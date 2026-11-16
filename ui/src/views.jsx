@@ -486,7 +486,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     host.addEventListener("paste", onPaste, true);
     host.addEventListener("dragover", onDragOver);
     host.addEventListener("drop", onDrop);
-    const copySelection = () => {
+    const copySelection = (clear = false) => {
       const text = terminal.getSelection();
       if (!text) {
         // Claude owns its TUI selection while mouse reporting is enabled. CSI-u
@@ -499,7 +499,10 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         return;
       }
       void writeClipboard(text)
-        .then(() => onStatus("已复制终端选中文本"))
+        .then(() => {
+          if (clear && !disposed && terminal.getSelection() === text) terminal.clearSelection();
+          onStatus("已复制终端选中文本");
+        })
         .catch(() => onStatus("无法写入本机剪贴板"));
     };
     const onCopy = (event) => {
@@ -510,6 +513,21 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       copySelection();
     };
     host.addEventListener("copy", onCopy, true);
+    const onRightMouseDown = (event) => {
+      if (event.button !== 2 || !visibleRef.current) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    const onContextMenu = (event) => {
+      if (!visibleRef.current || !focusedRef.current) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      terminal.focus();
+      if (terminal.hasSelection()) copySelection(true);
+      else receive(readClipboardContent());
+    };
+    host.addEventListener("mousedown", onRightMouseDown, true);
+    host.addEventListener("contextmenu", onContextMenu, true);
     onControls?.({
       edit(action) {
         if (!box.current?.contains(document.activeElement)) return false;
@@ -588,6 +606,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       clipboardHandler.dispose();
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("copy", onCopy, true);
+      host.removeEventListener("mousedown", onRightMouseDown, true);
+      host.removeEventListener("contextmenu", onContextMenu, true);
       host.removeEventListener("dragover", onDragOver);
       host.removeEventListener("drop", onDrop);
       onControls?.(null);
