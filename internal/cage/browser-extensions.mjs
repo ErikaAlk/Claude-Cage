@@ -37,6 +37,15 @@ export class BrowserExtensions {
     renameSync(temporary, join(this.root, 'registry.json'));
   }
   path(entry) { return join(this.root, 'packages', entry.package, entry.relative); }
+  popup(entry) {
+    const manifest = JSON.parse(readFileSync(join(this.path(entry), 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
+    const popup = manifest.action?.default_popup;
+    if (!popup) return '';
+    const origin = `chrome-extension://${entry.id}/`;
+    const url = new URL(popup, origin);
+    if (!url.href.startsWith(origin)) throw new Error('扩展弹窗地址无效');
+    return url.href;
+  }
   async management(input) {
     const evaluate = async repair => this.cdp('Runtime.evaluate', {
       expression: `manageCageExtensions(${JSON.stringify(input)})`, awaitPromise: true,
@@ -55,6 +64,7 @@ export class BrowserExtensions {
       try {
         const { id } = await this.cdp('Extensions.loadUnpacked', { path: this.path(entry) });
         if (id !== entry.id) throw new Error('扩展标识已变化');
+        entry.popupUrl = this.popup(entry);
         entry.error = '';
       } catch { entry.error = '扩展未能加载，请检查扩展文件或重新安装'; }
     }
@@ -104,6 +114,7 @@ export class BrowserExtensions {
           ...(typeof input.target === 'string' && /^[a-f0-9]{32}:[a-p]{32}$/.test(input.target) ? { source: input.target } : {}),
         });
         inserted = true;
+        this.records.get(id).popupUrl = this.popup(this.records.get(id));
         this.persist();
       } catch (error) {
         if (inserted) this.records.delete(id);
@@ -112,15 +123,29 @@ export class BrowserExtensions {
       }
       return this.request({ mode: 'list' });
     }
-    if (!['list', 'enable', 'disable', 'remove', 'options'].includes(mode)) throw new Error('扩展操作无效');
+    if (!['list', 'enable', 'disable', 'remove', 'options', 'open', 'pin', 'unpin'].includes(mode)) throw new Error('扩展操作无效');
     if (mode !== 'list' && (!extensionID.test(input.id || '') || input.id === this.protectedID)) throw new Error('扩展标识无效');
     const record = this.records.get(input.id);
+    if (mode === 'pin' || mode === 'unpin') {
+      if (!record) throw new Error('此扩展需要先通过 Cage 导入');
+      if (mode === 'pin' && (!record.enabled || record.error || !this.popup(record))) throw new Error('请先启用带有弹窗入口的扩展');
+      record.pinned = mode === 'pin';
+      this.persist();
+      return this.request({ mode: 'list' });
+    }
+    if (mode === 'open') {
+      if (!record?.enabled) throw new Error('请先启用此扩展');
+      const url = this.popup(record);
+      if (!url) throw new Error('此扩展没有弹窗入口');
+      return { url };
+    }
     if (mode === 'enable' && record) {
       const loaded = await this.cdp('Extensions.loadUnpacked', { path: this.path(record) });
       if (loaded.id !== input.id) {
         await this.cdp('Extensions.uninstall', { id: loaded.id }).catch(() => {});
         throw new Error('扩展标识已变化，请重新安装');
       }
+      record.popupUrl = this.popup(record);
     }
     if (mode === 'remove') {
       if (!record) return { native: true, id: input.id };
@@ -140,6 +165,8 @@ export class BrowserExtensions {
       if (!byID.has(entry.id)) byID.set(entry.id, { ...entry, enabled: false, managed: true, optionsUrl: '' });
       if (entry.source) byID.get(entry.id).source = entry.source;
       if (entry.error) byID.get(entry.id).error = entry.error;
+      byID.get(entry.id).pinned = entry.pinned === true;
+      byID.get(entry.id).popupUrl = entry.enabled && !entry.error ? entry.popupUrl || '' : '';
     }
     return { items: [...byID.values()].map(({ directory, package: path, relative, ...entry }) => entry) };
   }

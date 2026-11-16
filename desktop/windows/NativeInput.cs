@@ -22,6 +22,7 @@ internal sealed class NativeInput : TextBox
         this.publish = publish;
         BorderStyle = BorderStyle.None; Multiline = true; TabStop = false;
         ImeMode = ImeMode.On; Visible = false; Size = new Size(1, 24);
+        AccessibleName = "Cage 远程输入";
         LostFocus += (_, _) => {
             Cancel(); Emit("deactivated"); owner = ""; Visible = false;
         };
@@ -56,7 +57,7 @@ internal sealed class NativeInput : TextBox
             var scale = web.DeviceDpi / 96.0 * zoom;
             var point = Parent!.PointToClient(web.PointToScreen(new Point((int)(x * scale), (int)(y * scale))));
             Bounds = new Rectangle(point, new Size(1, Math.Max(1, (int)(height * scale))));
-            if (operation == "activate") Focus();
+            if (operation == "activate" && FindForm() == Form.ActiveForm) Focus();
             PositionCandidates();
         }
         else if (operation == "cancel") Cancel();
@@ -187,6 +188,18 @@ internal sealed class NativeInput : TextBox
     protected override void WndProc(ref Message message)
     {
         const int Start = 0x10d, End = 0x10e, Composition = 0x10f;
+        // 输入法可在组合开始前查询位置，此时原生编辑框尚无预编辑文字。
+        if (message.Msg == 0x288 && message.WParam.ToInt32() == 6 && message.LParam != IntPtr.Zero && Focused)
+        {
+            var position = Marshal.PtrToStructure<CharacterPosition>(message.LParam);
+            position.Point = PointToScreen(Point.Empty);
+            position.LineHeight = (uint)Height;
+            var bounds = RectangleToScreen(ClientRectangle);
+            position.Document = new Rect { Left = bounds.Left, Top = bounds.Top, Right = bounds.Right, Bottom = bounds.Bottom };
+            Marshal.StructureToPtr(position, message.LParam, false);
+            message.Result = new IntPtr(1);
+            return;
+        }
         bool committed = false;
         if (message.Msg is 0x100 or 0x101 or 0x104 or 0x105) ReadKeyMessage(message);
         if (!resetting && owner.Length > 0)
@@ -247,6 +260,7 @@ internal sealed class NativeInput : TextBox
         ImmSetCandidateWindow(context, ref candidate);
         ImmReleaseContext(Handle, context);
     }
+    [StructLayout(LayoutKind.Sequential)] private struct CharacterPosition { public uint Size, Character; public Point Point; public uint LineHeight; public Rect Document; }
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] private struct Candidate { public int Index, Style; public Point Point; public Rect Area; }
     [StructLayout(LayoutKind.Sequential)] private struct CompositionForm { public int Style; public Point Point; public Rect Area; }

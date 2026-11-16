@@ -25,8 +25,11 @@ const config = JSON.parse(
   readFileSync("/etc/claude-cage/browser-control.json", "utf8"),
 );
 const displayScale = config.display_scale === 1.5 ? 1.5 : 2;
+const appearanceFile = "/home/cage-browser/browser-appearance.json";
+let colorScheme = existsSync(appearanceFile) ? JSON.parse(readFileSync(appearanceFile, "utf8")).colorScheme : "light";
+if (!["light", "dark"].includes(colorScheme)) throw new Error("浏览器配色无效");
 // Started before Chromium, which then opens at this density.
-const displaySettings = createDisplaySettings({ file: "/home/cage-browser/.cache/cage-display/xsettings.conf", initial: displayScale });
+const displaySettings = createDisplaySettings({ file: "/home/cage-browser/.cache/cage-display/xsettings.conf", initial: displayScale, colorScheme });
 process.on("exit", () => displaySettings.close());
 const selectionFile = "/home/cage-browser/workbench-state.json";
 const homepageFile = "/home/cage-browser/homepage.json";
@@ -389,6 +392,7 @@ async function session(id) {
       cdp("Target.attachToTarget", { targetId: id, flatten: true }).then(async (r) => {
         uploadSessions.set(r.sessionId, id);
         await cdp("Page.enable", {}, r.sessionId);
+        await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: colorScheme }] }, r.sessionId);
         await cdp("Page.setInterceptFileChooserDialog", { enabled: true }, r.sessionId);
         await browserClipboard.attach(r.sessionId, id).then(result => {
           if (result?.skipped.length) console.warn("Browser copy observer skipped a modified or replaced document; reload the page to enable copy buttons.");
@@ -531,6 +535,11 @@ async function activate(id, focus = false) {
 }
 function checkedURL(value) {
   if (value === "about:blank") return value;
+  if (/^chrome-extension:/i.test(value)) {
+    const url = new URL(value);
+    if (url.protocol === "chrome-extension:" && /^[a-p]{32}$/.test(url.hostname) &&
+        url.hostname !== extensionId && !url.username && !url.password && !url.port) return url.href;
+  }
   if (/^https?:\/\//i.test(value)) {
     const url = new URL(value);
     if (url.username || url.password) throw new Error("Only HTTP(S) URLs without credentials are accepted");
@@ -923,19 +932,33 @@ const server = http.createServer(async (req, res) => {
         return { ok: true };
       }
       if (req.url === "/split") return setSplit(input);
-      if (req.url === "/settings") return browserSettings(input.mode || "general");
+      if (req.url === "/settings") {
+        if (input.mode !== "color-scheme") return browserSettings(input.mode || "general");
+        if (!["light", "dark"].includes(input.text)) throw new Error("浏览器配色无效");
+        colorScheme = input.text;
+        displaySettings.theme(colorScheme);
+        for (const pending of sessions.values()) {
+          const sid = await pending;
+          await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: colorScheme }] }, sid);
+        }
+        writeFileSync(appearanceFile, JSON.stringify({ colorScheme }), { mode: 0o600 });
+        return { ok: true, colorScheme };
+      }
       if (req.url === "/info") {
         const { product, protocolVersion } = await cdp("Browser.getVersion");
-        return { product, protocolVersion };
+        if (!targets.has(activeId)) return { product, protocolVersion, colorScheme };
+        const sid = await session(activeId);
+        const media = await cdp("Runtime.evaluate", { expression: "matchMedia('(prefers-color-scheme: dark)').matches", returnByValue: true }, sid);
+        return { product, protocolVersion, colorScheme, pageColorScheme: media.result.value ? "dark" : "light" };
       }
       if (req.url === "/extensions") {
         const result = await browserExtensions.request(input);
-        if (input.mode === "options" && result.url) {
+        if (["options", "open"].includes(input.mode) && result.url) {
           if (!result.url.startsWith(`chrome-extension://${input.id}/`)) throw new Error("扩展设置地址无效");
           const { targetId } = await cdp("Target.createTarget", { url: result.url });
           if (!targets.has(targetId)) targets.set(targetId, { targetId, type: "page", url: result.url });
           await activate(targetId, true);
-          return { id: targetId, url: result.url, kind: "web", title: "扩展选项" };
+          return { id: targetId, url: result.url, kind: "web", title: input.mode === "open" ? "浏览器扩展" : "扩展选项" };
         }
         return result;
       }

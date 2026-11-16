@@ -650,7 +650,7 @@ function App() {
       const internal = /^cage:\/\/settings(?:#(general|appearance|privacy|extensions|about))?\/?$/.exec(address.trim());
       if (internal) { await openBrowserSettings(internal[1] || "general"); return; }
       const url = normalizeURL(address);
-      if (network.mode !== "open" && !isGuestLocalURL(url)) {
+      if (network.mode !== "open" && !isGuestLocalURL(url) && !url.startsWith("chrome-extension://")) {
         setSafetyOpen(true);
         notify("请先完成关键检查，再访问外部网站。");
         return;
@@ -1331,6 +1331,10 @@ function App() {
     onNew={newPage} onNavigate={address => navigate(tab.id, address)} onOpen={openBrowserPage}
     onNewPrivate={() => openBrowserPage(undefined, true)} onNewRegular={() => openBrowserPage(undefined, false)}
     onSettings={openBrowserSettings}
+    onExtensionOpen={async id => {
+      const result = await action('/browser/extensions', { mode: 'open', id });
+      if (result) showBrowserResult(result);
+    }}
     onReload={() => tab.kind === "browser-settings" ? setBrowserSettingsRevision(value => value + 1) : action("/browser/reload", { id: tab.id })}
     onCloseBrowser={!dualBrowser || tab.id === rightId ? closeBrowser : undefined}
     downloads={downloads} onStatus={notify}

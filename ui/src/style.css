@@ -487,6 +487,10 @@ button.large {
   resize: none;
   font: 16px/24px system-ui;
 }
+.browser-extension-button { width: auto; min-width: 30px; max-width: 140px; flex-shrink: 0; gap: 5px; }
+.browser-extension-button svg { flex-shrink: 0; }
+.browser-extension-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) { .browser-extension-button span { display: none; } }
 .concealed {
   visibility: hidden;
   pointer-events: none;

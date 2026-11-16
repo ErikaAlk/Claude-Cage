@@ -1,8 +1,31 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Download, ExternalLink, FolderInput, Puzzle, RefreshCw, Trash2, Upload, X } from 'lucide-react';
+import { Download, ExternalLink, FolderInput, Pin, PinOff, Puzzle, RefreshCw, Trash2, Upload, X } from 'lucide-react';
 import { api, uploadFile } from './api';
 import { assertConnection, getClientContext } from './client-context.mjs';
 import { InlineSelect } from './inline-select';
+
+export function PinnedBrowserExtensions({ ready, onOpen, onStatus }) {
+  const [loaded, setLoaded] = useState({ connection: '', items: [] }), [opening, setOpening] = useState('');
+  const connection = getClientContext().connection_id;
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    const refresh = () => api('/browser/extensions', { mode: 'list' }).then(result => {
+      if (alive) setLoaded({ connection, items: result.items.filter(item => item.pinned && item.enabled && item.popupUrl) });
+    }).catch(error => { if (alive) onStatus(error.message); });
+    void refresh();
+    window.addEventListener('cage-browser-extensions-changed', refresh);
+    return () => { alive = false; window.removeEventListener('cage-browser-extensions-changed', refresh); };
+  }, [ready, connection]);
+  return (loaded.connection === connection ? loaded.items : []).map(item => <button key={item.id} className="icon-button browser-extension-button"
+    aria-label={`打开扩展 ${item.name}`} title={item.name} disabled={!ready || Boolean(opening)}
+    onClick={async () => {
+      setOpening(item.id);
+      try { await onOpen(item.id); }
+      catch (error) { onStatus(error.message); }
+      finally { setOpening(''); }
+    }}><Puzzle size={15} /><span>{item.name}</span></button>);
+}
 
 function Permissions({ item, expanded = false }) {
   const permissions = [...(item.permissions || []), ...(item.hostPermissions || [])];
@@ -115,6 +138,7 @@ export function BrowserExtensions({ onOpenPage, onInternal, onConfirm }) {
       if (result.native) await onInternal('extensions', result.id);
       else if (result.id && result.url) await onOpenPage(result);
       else if (result.items) setItems(result.items);
+      window.dispatchEvent(new Event('cage-browser-extensions-changed'));
     } catch (error) { setError(error.message); }
     finally { setBusy(''); }
   };
@@ -147,6 +171,8 @@ export function BrowserExtensions({ onOpenPage, onInternal, onConfirm }) {
       {item.description && <p>{item.description}</p>}{item.error && <p role="alert" className="browser-settings-error">{item.error}</p>}
       <Permissions item={item} />
       <div className="extension-item-footer"><span>{item.id}</span><div className="browser-setting-actions">
+        {item.popupUrl && <button disabled={Boolean(busy) || !item.enabled} onClick={() => act('open', item.id)}>打开扩展</button>}
+        {item.popupUrl && <button aria-pressed={Boolean(item.pinned)} disabled={Boolean(busy) || !item.enabled} onClick={() => act(item.pinned ? 'unpin' : 'pin', item.id)}>{item.pinned ? <PinOff size={14} /> : <Pin size={14} />}{item.pinned ? '取消固定' : '固定到顶栏'}</button>}
         {item.optionsUrl && <button disabled={Boolean(busy) || !item.enabled} onClick={() => act('options', item.id)}>扩展选项</button>}
         <button disabled={Boolean(busy) || item.mayDisable === false} onClick={() => act('remove', item.id)}><Trash2 size={14} />{item.managed ? '移除' : '管理'}</button>
       </div></div>

@@ -7,21 +7,22 @@ export function displayDensity(value) {
   return typeof value === "number" && value >= 0.75 && value <= 4 ? Math.round(value * 64) / 64 : null;
 }
 
-export function densitySettings(scale) {
+export function densitySettings(scale, colorScheme) {
   const dpi = Math.round(scale * 96 * 1024);
-  return `Xft/DPI ${dpi}\nGdk/WindowScalingFactor 1\nGdk/UnscaledDPI ${dpi}\n`;
+  return `Xft/DPI ${dpi}\nGdk/WindowScalingFactor 1\nGdk/UnscaledDPI ${dpi}\n` +
+    (colorScheme ? `Net/ThemeName "${colorScheme === "dark" ? "Adwaita-dark" : "Adwaita"}"\nGtk/ApplicationPreferDarkTheme ${colorScheme === "dark" ? 1 : 0}\n` : "");
 }
 
 // A display's pixel density is an XSETTINGS value, and Chromium follows a
 // change without restarting. Each viewer can then have the density of its own
 // screen. Without xsettingsd the display keeps the density it started with.
 export function createDisplaySettings({
-  file, initial, available = existsSync("/usr/bin/xsettingsd"),
+  file, initial, colorScheme, available = existsSync("/usr/bin/xsettingsd"),
   start = () => spawn("/usr/bin/xsettingsd", ["--config=" + file], { stdio: "ignore" }), restart = 1000,
 }) {
   let scale = initial, child, timer, closed = false;
   const write = () => {
-    writeFileSync(file + ".new", densitySettings(scale));
+    writeFileSync(file + ".new", densitySettings(scale, colorScheme));
     renameSync(file + ".new", file);
   };
   const run = () => {
@@ -43,6 +44,11 @@ export function createDisplaySettings({
   return {
     available,
     get scale() { return scale; },
+    theme(value) {
+      if (!["light", "dark"].includes(value)) throw new Error("浏览器配色无效");
+      colorScheme = value;
+      if (available) { write(); child?.kill("SIGHUP"); }
+    },
     set(value) {
       if (!available || value === scale) return scale;
       scale = value;
