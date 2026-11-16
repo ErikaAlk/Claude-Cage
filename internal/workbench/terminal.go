@@ -18,7 +18,7 @@ func (s *Server) newTerminal(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &input) {
 		return
 	}
-	session, err := s.createTerminal(input)
+	session, err := s.createTerminalWithContext(r.Context(), input)
 	switch {
 	case errors.Is(err, errTerminalsClosed):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -131,7 +131,7 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 			}
 		case "resize":
 			if input.Cols > 1 && input.Cols < 600 && input.Rows > 1 && input.Rows < 400 {
-				if err := session.file.Resize(input.Cols, input.Rows); err != nil {
+				if err := session.resize(input.Cols, input.Rows); err != nil {
 					return
 				}
 			}

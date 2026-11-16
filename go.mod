@@ -19,6 +19,7 @@ tool (
 
 require (
 	al.essio.dev/pkg/shellescape v1.6.1
+	github.com/charmbracelet/x/vt v0.1.0
 	github.com/containerd/continuity v0.5.0
 	github.com/coreos/go-semver v0.3.1
 	github.com/docker/go-units v0.5.0
@@ -54,7 +55,7 @@ require (
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cheggaaa/pb/v3 v3.2.1 // indirect
 	github.com/cilium/ebpf v0.22.0 // indirect
-	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/containerd/cgroups/v3 v3.1.3 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
@@ -142,7 +143,19 @@ require (
 
 require (
 	github.com/anchore/go-lzo v0.1.0 // indirect
+	github.com/charmbracelet/colorprofile v0.4.2 // indirect
+	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff // indirect
+	github.com/charmbracelet/x/ansi v0.11.7 // indirect
+	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
+	github.com/charmbracelet/x/term v0.2.2 // indirect
+	github.com/charmbracelet/x/termios v0.1.1 // indirect
+	github.com/charmbracelet/x/windows v0.2.2 // indirect
+	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/elliotwutingfeng/asciiset v0.0.0-20260129054604-cfde2086bc57 // indirect
+	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
+	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/pkg/xattr v0.4.12 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
+	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 )
