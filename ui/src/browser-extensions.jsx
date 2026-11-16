@@ -24,7 +24,7 @@ export function PinnedBrowserExtensions({ ready, onOpen, onStatus }) {
       try { await onOpen(item.id); }
       catch (error) { onStatus(error.message); }
       finally { setOpening(''); }
-    }}><Puzzle size={15} /><span>{item.name}</span></button>);
+    }}>{item.icon ? <img src={item.icon} alt="" width="16" height="16" /> : <Puzzle size={16} />}</button>);
 }
 
 function Permissions({ item, expanded = false }) {

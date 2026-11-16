@@ -1332,6 +1332,14 @@ function App() {
     onNewPrivate={() => openBrowserPage(undefined, true)} onNewRegular={() => openBrowserPage(undefined, false)}
     onSettings={openBrowserSettings}
     onExtensionOpen={async id => {
+      if (!macGuest && !status.guest_system?.startsWith('windows')) {
+        let target = tab.kind === 'browser-settings' ? browserTabs.find(item => item.kind === 'web') : tab;
+        if (!target) target = await openBrowserPage('about:blank', false);
+        if (!target) return;
+        await select(target.id);
+        await action('/browser/extensions', { mode: 'action', id, target: target.id });
+        return;
+      }
       const result = await action('/browser/extensions', { mode: 'open', id });
       if (result) showBrowserResult(result);
     }}

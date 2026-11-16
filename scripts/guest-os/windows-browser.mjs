@@ -740,21 +740,24 @@ export function createNativeBrowserService(options = {}) {
       const splitDirectory = options.splitDirectory ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "split-extension");
       const extensionTools = !options.remoteHeadless && typeof modules.BrowserExtensions === "function" && existsSync(path.join(splitDirectory, "manifest.json"));
       controllerID = extensionTools ? nativeExtensionIDForPath(splitDirectory) : "";
+      let extensionControl;
+      const startupExtensions = extensionTools ? new modules.BrowserExtensions({ directory, cdp,
+        control: (...args) => extensionControl(...args), protectedID: controllerID,
+        extractArchive: extractWindowsExtensionArchive, idForPath: nativeExtensionIDForPath }) : undefined;
       try {
         context = await chromium.launchPersistentContext(options.profileDirectory ?? path.join(directory, "Profile"), {
           executablePath: options.executablePath ?? browserExecutable(), headless: mac || options.remoteHeadless === true || (options.testing === true && options.headless !== false),
           chromiumSandbox: true, viewport, deviceScaleFactor: displayScale, acceptDownloads: true,
           ...(timezone ? { timezoneId: timezone } : {}), ...(language ? { locale: language } : {}),
           ...contextProxy(),
-          // CDP transports the user's input. Preserve the native browser identity
-          // in every context, including private pages that cannot load extensions.
-          args: [...(creationProfile ? browserProfileFlags(creationProfile, mac ? "darwin" : options.testing ? process.platform : "win32") : []),"--disable-blink-features=AutomationControlled", "--disable-quic", "--no-first-run", "--no-default-browser-check", "--restore-last-session", "--disable-session-crashed-bubble", ...(!options.remoteHeadless ? ["--host-resolver-rules=MAP *.cage-editor.localhost 127.0.0.1"] : []), ...(networkMode === "packet" ? ["--no-proxy-server"] : []), ...(extensionTools ? ["--enable-unsafe-extension-debugging", `--load-extension=${splitDirectory}`] : [])],
+          args: [...(creationProfile ? browserProfileFlags(creationProfile, mac ? "darwin" : options.testing ? process.platform : "win32") : []), "--disable-quic", "--no-first-run", "--no-default-browser-check", "--restore-last-session", "--disable-session-crashed-bubble", ...(!options.remoteHeadless ? ["--host-resolver-rules=MAP *.cage-editor.localhost 127.0.0.1"] : []), ...(networkMode === "packet" ? ["--no-proxy-server"] : []), ...(extensionTools ? ["--enable-unsafe-extension-debugging", `--load-extension=${[splitDirectory, ...startupExtensions.launchPaths()].join(',')}`] : [])],
           ignoreDefaultArgs: ["--enable-automation", ...(extensionTools ? ["--disable-extensions"] : []), ...(mac ? ["--mute-audio"] : [])], timeout: 20000,
         });
       } catch (error) { if (error.code) throw error; throw failure("browser_unavailable", "Windows 客机图形浏览器未能启动，请检查 GUI 会话和安装组件"); }
       context.setDefaultTimeout(7000); owner = context.browser();
       if (!owner) throw failure("browser_unavailable", "Windows 客机浏览器控制连接未就绪");
       browserCDP = await owner.newBrowserCDPSession();
+      if (startupExtensions) await startupExtensions.restore();
       clipboard = new modules.BrowserClipboard(cdp, observeCopy, { includeChanges: mac, source: async () => {
         const page = await privateClipboardPage();
         const connection = await page.context().newCDPSession(page);
@@ -830,8 +833,10 @@ export function createNativeBrowserService(options = {}) {
             }
             return controller.session;
           };
-          extensions = new modules.BrowserExtensions({ directory, cdp, control, protectedID, extractArchive: extractWindowsExtensionArchive, idForPath: nativeExtensionIDForPath });
-          await control(); await extensions.restore();
+          if (protectedID !== controllerID) throw failure("extensions_unavailable", "浏览器控制扩展标识不一致");
+          extensionControl = control;
+          extensions = startupExtensions;
+          await control();
         } catch { extensions = undefined; }
       }
       context.on("close", () => { context = undefined; initialized = undefined; tabs.clear(); sessions.clear(); active = ""; });
@@ -1528,6 +1533,7 @@ export function createNativeBrowserService(options = {}) {
     if (action === "extensions") {
       if (!extensions) throw failure("extensions_unavailable", "Windows 扩展管理组件未就绪，请核对浏览器版本和安装组件");
       const result = await extensions.request(input);
+      if (result.action) throw failure("action_unavailable", "此环境不支持原生扩展弹窗，请使用扩展页面入口");
       if (["options", "open"].includes(input.mode) && result.url) {
         if (!result.url.startsWith(`chrome-extension://${input.id}/`)) throw failure("invalid_input", "扩展设置地址无效");
         const tab = await addPage(await context.newPage()); await tab.page.goto(result.url, { waitUntil: "commit", timeout: 7000 }); await activate(tab.id); return { id: tab.id, url: result.url, kind: "web", title: "扩展选项" };
@@ -1539,7 +1545,9 @@ export function createNativeBrowserService(options = {}) {
       if (!tabs.has(active)) return { ...version, colorScheme };
       const tab = target({ id: active }, false);
       const dark = await tab.page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
-      return { ...version, colorScheme, pageColorScheme: dark ? "dark" : "light" };
+      const { frameTree } = await cdp("Page.getFrameTree", {}, tab.session);
+      return { ...version, colorScheme, pageColorScheme: dark ? "dark" : "light",
+        pageURL: frameTree.frame.url, unreachableURL: frameTree.frame.unreachableUrl || "" };
     }
     if (action === "cookies") {
       const tab = target(input, false);

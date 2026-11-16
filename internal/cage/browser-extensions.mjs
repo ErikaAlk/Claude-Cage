@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve, sep, extname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -37,6 +37,27 @@ export class BrowserExtensions {
     renameSync(temporary, join(this.root, 'registry.json'));
   }
   path(entry) { return join(this.root, 'packages', entry.package, entry.relative); }
+  launchPaths() {
+    // Chromium 的命令行使用逗号分隔路径，其余目录由 restore 通过协议加载。
+    return [...this.records.values()].filter(entry => entry.enabled)
+      .map(entry => this.path(entry)).filter(path => !path.includes(','));
+  }
+  icon(entry) {
+    const root = resolve(this.path(entry));
+    const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
+    const icons = manifest.action?.default_icon || manifest.icons;
+    if (!icons) return '';
+    const name = typeof icons === 'string' ? icons : Object.entries(icons)
+      .filter(([size, value]) => /^\d+$/.test(size) && typeof value === 'string')
+      .sort(([a], [b]) => Math.abs(Number(a) - 32) - Math.abs(Number(b) - 32))[0]?.[1];
+    if (!name) throw new Error('扩展图标声明无效');
+    const filename = resolve(root, name);
+    const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.ico': 'image/x-icon', '.bmp': 'image/bmp' }[extname(filename).toLowerCase()];
+    if (!filename.startsWith(root + sep) || !mime) throw new Error('扩展图标路径或格式无效');
+    const bytes = readFileSync(filename);
+    if (bytes.length > 512 << 10) throw new Error('扩展图标不能超过 512 KB');
+    return `data:${mime};base64,${bytes.toString('base64')}`;
+  }
   popup(entry) {
     const manifest = JSON.parse(readFileSync(join(this.path(entry), 'manifest.json'), 'utf8').replace(/^\uFEFF/, ''));
     const popup = manifest.action?.default_popup;
@@ -59,12 +80,16 @@ export class BrowserExtensions {
     return response.result.value;
   }
   async restore() {
+    const loaded = new Map((await this.cdp('Extensions.getExtensions')).extensions.map(entry => [entry.id, entry]));
     for (const entry of this.records.values()) {
       if (!entry.enabled) continue;
       try {
-        const { id } = await this.cdp('Extensions.loadUnpacked', { path: this.path(entry) });
+        const existing = loaded.get(entry.id);
+        const { id } = existing?.enabled && resolve(existing.path) === resolve(this.path(entry))
+          ? existing : await this.cdp('Extensions.loadUnpacked', { path: this.path(entry) });
         if (id !== entry.id) throw new Error('扩展标识已变化');
         entry.popupUrl = this.popup(entry);
+        entry.icon = this.icon(entry);
         entry.error = '';
       } catch { entry.error = '扩展未能加载，请检查扩展文件或重新安装'; }
     }
@@ -115,6 +140,7 @@ export class BrowserExtensions {
         });
         inserted = true;
         this.records.get(id).popupUrl = this.popup(this.records.get(id));
+        this.records.get(id).icon = this.icon(this.records.get(id));
         this.persist();
       } catch (error) {
         if (inserted) this.records.delete(id);
@@ -123,9 +149,14 @@ export class BrowserExtensions {
       }
       return this.request({ mode: 'list' });
     }
-    if (!['list', 'enable', 'disable', 'remove', 'options', 'open', 'pin', 'unpin'].includes(mode)) throw new Error('扩展操作无效');
+    if (!['list', 'enable', 'disable', 'remove', 'options', 'open', 'action', 'pin', 'unpin'].includes(mode)) throw new Error('扩展操作无效');
     if (mode !== 'list' && (!extensionID.test(input.id || '') || input.id === this.protectedID)) throw new Error('扩展标识无效');
     const record = this.records.get(input.id);
+    if (mode === 'action') {
+      const { items } = await this.management({ mode: 'list' });
+      if (!items.some(item => item.id === input.id && item.enabled)) throw new Error('请先启用此扩展');
+      return { action: true };
+    }
     if (mode === 'pin' || mode === 'unpin') {
       if (!record) throw new Error('此扩展需要先通过 Cage 导入');
       if (mode === 'pin' && (!record.enabled || record.error || !this.popup(record))) throw new Error('请先启用带有弹窗入口的扩展');
@@ -146,6 +177,7 @@ export class BrowserExtensions {
         throw new Error('扩展标识已变化，请重新安装');
       }
       record.popupUrl = this.popup(record);
+      record.icon = this.icon(record);
     }
     if (mode === 'remove') {
       if (!record) return { native: true, id: input.id };
@@ -166,6 +198,7 @@ export class BrowserExtensions {
       if (entry.source) byID.get(entry.id).source = entry.source;
       if (entry.error) byID.get(entry.id).error = entry.error;
       byID.get(entry.id).pinned = entry.pinned === true;
+      byID.get(entry.id).icon = entry.icon || '';
       byID.get(entry.id).popupUrl = entry.enabled && !entry.error ? entry.popupUrl || '' : '';
     }
     return { items: [...byID.values()].map(({ directory, package: path, relative, ...entry }) => entry) };
