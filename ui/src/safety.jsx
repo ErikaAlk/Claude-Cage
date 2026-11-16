@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { api, writeClipboard } from "./api";
 import { Modal } from "./views";
+import { DeviceChecks } from "./device-checks";
 import { networkState, reportForSharing } from "./safety-state.mjs";
 
 const diagnostics = [
@@ -24,11 +25,25 @@ const diagnostics = [
   },
   {
     name: "浏览器信息",
-    source: "fuck-claude.com",
-    url: "https://fuck-claude.com/",
+    source: "fuck-claude.vercel.app",
+    url: "https://fuck-claude.vercel.app/",
     description: "查看时区、语言、字体等浏览器信号的社区评估。",
+    attribution: "原项目 FuckClaude 由 LinXiaoTao 创建并持续维护。",
+    links: [
+      { label: "原项目官网", url: "https://fuck-claude.vercel.app/" },
+      { label: "开源仓库", url: "https://github.com/LinXiaoTao/FuckClaude" },
+      {
+        label: "初始提交",
+        url: "https://github.com/LinXiaoTao/FuckClaude/commit/420c79bb0531b12ea2788e726ffbf81075111737",
+      },
+    ],
   },
 ];
+
+export async function bindDetectedMacOSExit(ip, onConfirm) {
+  if (!(await onConfirm({ title: "绑定固定出口？", body: `客机终端、浏览器和代理均测得 ${ip}。保存后请重启客机并重新检测。`, confirm: "绑定固定出口" }))) return null;
+  return api("/macos/exit-policy", { ip });
+}
 
 export function SafetyPanel({
   status,
@@ -121,9 +136,7 @@ export function SafetyPanel({
     >
       <div className="modal-body safety-body">
         {safety.macos_exit_candidate?.ip && <button disabled={busy} onClick={async () => {
-          const ip = safety.macos_exit_candidate.ip;
-          if (!(await onConfirm({ title: "绑定固定出口？", body: `客机终端、浏览器和代理均测得 ${ip}。保存后请重启客机并重新检测。`, confirm: "绑定固定出口" }))) return;
-          try { await api("/macos/exit-policy", { ip }); setNotice("固定出口已提交，请在保存完成后重启客机并重新检测。"); }
+          try { if (await bindDetectedMacOSExit(safety.macos_exit_candidate.ip, onConfirm)) setNotice("固定出口已提交，请在保存完成后重启客机并重新检测。"); }
           catch (e) { setError(e.message); }
         }}>绑定检测到的固定出口 {safety.macos_exit_candidate.ip}</button>}
         <div className={`safety-summary ${network.mode}`}>
@@ -220,6 +233,7 @@ export function SafetyPanel({
             检查涵盖出站规则、代理故障关闭、DNS、共享目录、宿主管理接口，以及系统和浏览器的实际配置。关键项失败或未知时保持外网关闭。
           </p>
         )}
+        <DeviceChecks disabled={busy || !status.vm_running} />
         {report?.checks?.some((check) => !check.critical) && (
           <div className="safety-advisories">
             {report.checks
@@ -249,6 +263,24 @@ export function SafetyPanel({
                 在 Cage 中打开
                 <ArrowUpRight size={14} />
               </button>
+              {site.attribution && (
+                <div className="safety-scope">
+                  <p>{site.attribution}</p>
+                  <div className="safety-sources">
+                    {site.links.map((link) => (
+                      <button
+                        key={link.url}
+                        className="text-button"
+                        disabled={!online || busy}
+                        onClick={() => open(link.url)}
+                      >
+                        {link.label}
+                        <ArrowUpRight size={12} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>

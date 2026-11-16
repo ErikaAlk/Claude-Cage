@@ -5,6 +5,7 @@ import { isRemoteClient } from "./client-context.mjs";
 import { MacOSAccountGate, useAccount } from "./account";
 import { GuestSystemPicker, HostCloneSummary, validGuestChoice } from "./guest-system-picker";
 import { InitializationStorage } from "./initialization-storage";
+import { GuestProfileOptions, guestOptionsForSystem } from "./guest-profile";
 import { ProxySettings } from "./proxy-settings";
 import { SetupProgress } from "./setup-progress";
 import { DiagnosticSettings } from "./diagnostics.jsx";
@@ -14,6 +15,7 @@ import { InitializationChecks, InitializationDetails } from "./initialization-ch
 import { MacOSLogin } from "./macos-login";
 import { Modal } from "./modal";
 import { SafetyMessage } from "./safety-message";
+import { bindDetectedMacOSExit } from "./safety";
 import { needsProxySetup } from "./onboarding-state.mjs";
 import { networkState } from "./safety-state.mjs";
 import { useSSHNavigation } from "./remote-hosts";
@@ -57,12 +59,14 @@ function Initialization({ initial, onComplete }) {
   const [status, setStatus] = useState(null);
   const [proxy, setProxy] = useState(null);
   const [choice, setChoice] = useState(undefined);
+  const [guestProfile, setGuestProfile] = useState(null);
   const [storage, setStorage] = useState(null);
   const [pending, setPending] = useState(null);
+  const [macRecovery, setMacRecovery] = useState(null);
+  const [recoveryError, setRecoveryError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [connectionError, setConnectionError] = useState("");
-  const [git, setGit] = useState(null);
   const [details, setDetails] = useState(false);
   const [help, setHelp] = useState(false);
   const [dialog, setDialog] = useState(null);
@@ -76,7 +80,9 @@ function Initialization({ initial, onComplete }) {
   const job = status?.job || {};
   const busy = submitting || Boolean(job.running);
   const network = networkState(status);
-  const ready = Boolean(status?.ready && status.vm_running && !busy && !job.error && network.mode === "open");
+  const exitCandidate = status?.guest_system === "macos" && status.safety?.macos_exit_candidate?.ip;
+  const needsExitRestart = status?.guest_system === "macos" && status.safety?.error === "已保存固定出口。请重启 macOS 客机，登录后重新检测。";
+  const ready = Boolean(status?.ready && status.vm_running && !busy && !job.error && !needsExitRestart && network.mode === "open");
   const confirm = options => new Promise(resolve => setDialog({ ...options, resolve }));
   const settleDialog = value => { dialog?.resolve(value); setDialog(null); };
 
@@ -101,6 +107,10 @@ function Initialization({ initial, onComplete }) {
         else setConnectionError(results[0].reason.message);
         if (results[1].status === "fulfilled") {
           const install = results[1].value;
+          if (install?.pending?.system === "macos" && !install?.activate) {
+            try { setMacRecovery(await api("/macos/install-recovery")); setRecoveryError(""); }
+            catch (error) { if (alive.current) { setMacRecovery(null); setRecoveryError(error.message); } }
+          } else { setMacRecovery(null); setRecoveryError(""); }
           setPending(install?.pending || null);
           if (!restored.current) {
             restored.current = true;
@@ -143,23 +153,19 @@ function Initialization({ initial, onComplete }) {
   function startOptions() {
     if (account?.guest_system) return {};
     if (pending) return { guest_system: pending.system };
-    if (!choice) return job.setup_progress?.system ? { guest_system: job.setup_progress.system } : {};
-    return { guest_system: choice.guest_system, media: choice.media, sha256: choice.sha256, clone_key: choice.clone_key, editor_terms: choice.editor_terms };
+    const preferences = guestProfile ? { guest_profile: guestOptionsForSystem(guestProfile, choice?.guest_system) } : {};
+    if (!choice) return job.setup_progress?.system ? { guest_system: job.setup_progress.system } : preferences;
+    return { guest_system: choice.guest_system, media: choice.media, sha256: choice.sha256, clone_key: choice.clone_key, editor_terms: choice.editor_terms, ...preferences };
   }
   async function install() {
     if (needsProxySetup(null, status, proxy)) { setError("请先选择并应用代理节点。"); setStep("proxy"); return; }
     await run(async () => {
-      const check = await api("/host/git");
-      if (!check.ready) { setGit(check); return; }
       await api("/environment/initialization", { action: "install" });
       const accepted = await api("/start", startOptions());
       if (!alive.current) return;
-      setGit(null); setStep("install");
+      setStep("install");
       setStatus(current => ({ ...current, job: { ...accepted, running: true, kind: accepted.kind || "start", message: accepted.message || "正在准备客机环境…" } }));
     });
-  }
-  async function enableGit() {
-    await run(async () => { const next = await api("/host/git", { confirm: true }); setGit(next.ready ? null : next); });
   }
   async function stop() {
     if (!await confirm({ title: "停止当前安装？", body: "安装进度、已下载文件和虚拟磁盘会保留。你可以在此界面继续安装。", confirm: "停止安装" })) return;
@@ -168,32 +174,49 @@ function Initialization({ initial, onComplete }) {
   async function enter() {
     await run(async () => { await api("/environment/initialization", { action: "complete" }); await refresh(); if (alive.current) onComplete(); });
   }
+  async function waitForJob(accepted, kind) {
+    if (!accepted.id) throw new Error("操作未返回任务编号，请核对状态后重试。");
+    while (alive.current) {
+      const next = await api("/status");
+      if (!alive.current) break;
+      setStatus(next);
+      const current = next.job;
+      if (current?.id !== accepted.id || current.kind !== kind) throw new Error("操作状态已变化，请核对状态后重试。");
+      if (current.error || current.canceled) throw new Error(current.error || "操作已取消，请核对状态后重试。");
+      if (!current.running) return next;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    throw new Error("初始化页面已关闭，操作未继续。");
+  }
+  async function bindExit() {
+    await run(async () => {
+      const accepted = await bindDetectedMacOSExit(exitCandidate, confirm);
+      if (!accepted) return;
+      await waitForJob(accepted, "settings");
+    });
+  }
+  async function restart() {
+    await run(async () => {
+      const running = status.vm_running;
+      if (!await confirm({ title: running ? "重启虚拟 Mac 并检查？" : "启动客机并重新检测？", body: "请先保存文件。当前终端会话会结束，浏览器登录和项目文件会保留。重新检测通过前，外网保持关闭。", confirm: running ? "重启并检查" : "启动并检测" })) return;
+      const current = await api("/status");
+      if (!alive.current) return;
+      if (current.job?.running) throw new Error("其他操作仍在进行，请等待完成后重试。");
+      if (current.vm_running) {
+        const stopped = await waitForJob(await api("/stop", {}), "stop");
+        if (stopped.vm_running) throw new Error("客机尚未停止，请核对状态后重试。");
+      }
+      if (!alive.current) return;
+      const accepted = await api("/start", {});
+      if (!accepted.id) throw new Error("启动请求未返回任务编号，请核对状态后重试。");
+      setStatus(current => ({ ...current, job: { ...accepted, running: true, kind: "start", message: accepted.message || "正在启动并检查客机…" } }));
+    });
+  }
   async function checkNetwork() {
     await run(async () => {
       const accepted = await api("/safety/check", {});
       setStatus(current => ({ ...current, job: { ...accepted, running: true, kind: "safety", message: "正在检查代理出口和环境隔离…" } }));
     });
-  }
-  async function restart() {
-    if (!await confirm({ title: "重启虚拟 Mac 并检查？", body: "请先保存客机中的工作。当前会话会断开，客机磁盘、账户和项目文件会保留。", confirm: "重启并检查" })) return;
-    await run(async () => {
-      const accepted = await api("/stop", {});
-      let stopped;
-      do {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        if (!alive.current) return;
-        stopped = await api("/status");
-        setStatus(stopped);
-        if (stopped.job?.id !== accepted.id) throw new Error("停止操作状态已变化，请核对客机状态后继续。");
-      } while (stopped.job?.running);
-      if (stopped.job?.error) throw new Error(stopped.job.error);
-      await api("/start", {});
-    });
-  }
-  async function bindExit() {
-    const ip = status.safety?.macos_exit_candidate?.ip;
-    if (!ip || !await confirm({ title: "确认固定出口？", body: `客机终端、浏览器与代理均测得 ${ip}。绑定后仅允许此 IP，之后需要重启客机并重新检测。`, confirm: "绑定固定出口" })) return;
-    await run(() => api("/macos/exit-policy", { ip }));
   }
   async function back() {
     if (step === "proxy" && proxyDirty && !await confirm({ title: "放弃尚未应用的代理修改？", body: "已经保存并应用的代理会保留，当前未应用的表单修改会丢弃。", confirm: "放弃修改" })) return;
@@ -236,21 +259,51 @@ function Initialization({ initial, onComplete }) {
           {step === "system" && <>
             <GuestSystemPicker system={choice} onChange={setChoice} preserveOnUnmount deferMatch />
             <InitializationStorage value={storage} onChange={setStorage} disabled={busy} />
+            <GuestProfileOptions value={guestProfile} onChange={setGuestProfile} disabled={busy} system={choice?.guest_system} />
           </>}
           {step === "proxy" && <><ProxySettings initializing status={status} onConfirm={confirm} onDirty={setProxyDirty} onApplied={async () => { setProxy(await api("/proxy")); pollNow.current?.(); }} />{choice?.clone && !needsProxySetup(null, status, proxy) && <HostCloneSummary pending={choice.pending} onChange={setChoice} />}</>}
           {step === "install" && (ready ? <div className="initialization-ready"><ShieldCheck size={36} /><h2>环境已就绪</h2><p>独立客机已安装，工具、文件和登录状态会持续保存。以后打开 Cage 可直接进入工作台。</p></div> : <>
-            {progress ? <SetupProgress job={progress} onDetails={() => setDetails(true)} onStop={stop} onRetry={install} disconnected={Boolean(connectionError) || submitting} /> : (busy || status.guest_system !== "macos" || !networkPending) && <div className="initialization-operation" role="status">{busy && <LoaderCircle size={22} className="spin" />}<p>{job.message || (status.vm_running ? "请完成客机连接和网络检查。" : "准备继续原安装，已有文件和磁盘会保留。")}</p>{!busy && !job.error && <button className="primary" disabled={Boolean(connectionError)} onClick={install}>{status.ready ? "重新启动并检查" : "继续安装"}</button>}{busy && <button onClick={stop} disabled={submitting}>停止安装</button>}</div>}
-            {job.error && !progress && !(status.guest_system === "macos" && networkPending) && <div className="initialization-notice" role="alert"><SafetyMessage message={job.error} />{!networkPending && <button className="primary" disabled={busy || Boolean(connectionError)} onClick={install}>继续安装</button>}</div>}
+            {exitCandidate && <section className="initialization-notice" aria-label="确认固定出口"><p>客机终端、浏览器和代理已测得一致出口。请确认是否将它绑定为固定出口。</p><button disabled={busy || Boolean(connectionError)} onClick={bindExit}>绑定检测到的固定出口 {exitCandidate}</button></section>}
+            {needsExitRestart && <section className="initialization-notice" aria-label="固定出口已保存"><p>固定出口已保存。重启客机并重新检测后才能进入工作台。</p><button className="primary" disabled={busy || Boolean(connectionError)} onClick={restart}>{status.vm_running ? "重启客机并重新检测" : "启动客机并重新检测"}</button></section>}
+            {progress ? <SetupProgress job={progress} onDetails={() => setDetails(true)} onStop={stop} onRetry={needsExitRestart ? restart : install} disconnected={Boolean(connectionError) || submitting} /> : (busy || status.guest_system !== "macos" || !networkPending) && <div className="initialization-operation" role="status">{busy && <LoaderCircle size={22} className="spin" />}<p>{job.message || (status.vm_running ? "请完成客机连接和网络检查。" : "准备继续原安装，已有文件和磁盘会保留。")}</p>{!busy && !job.error && !needsExitRestart && <button className="primary" disabled={Boolean(connectionError)} onClick={install}>{status.ready ? "重新启动并检查" : "继续安装"}</button>}{busy && <button onClick={stop} disabled={submitting}>停止安装</button>}</div>}
+            {pending?.system === "macos" && macRecovery?.available && <section className="initialization-notice" aria-label="恢复 macOS 组件安装">
+              <h2>继续安装 macFUSE</h2>
+              <p>macOS 27 需要你在客机中完成一次管理员授权，这是正常流程。客机磁盘和安装进度已保留。请按以下顺序操作：</p>
+              <ol>
+                <li>启动恢复客机。</li>
+                <li>打开恢复画面，先登录安装时创建的客机普通账户。</li>
+                <li>点击「打开 Apple Installer」继续安装。</li>
+                <li>安装器要求管理员认证时，用户名填 cagesetup，密码与你登录 Cage 的账户密码相同。</li>
+                <li>系统弹出允许访问系统配置文件的提示时，选择允许。</li>
+              </ol>
+              <p>安装过程中关闭恢复画面会取消本次作业；取消不会丢失已有进度，重新启动客机后再试。反复失败时，可使用页面底部的「日志与诊断」查看记录。</p>
+              {!macRecovery.running && <button disabled={busy} onClick={() => run(() => api("/macos/install-recovery", { action: "start" }))}>启动恢复客机</button>}
+              {macRecovery.running && <MacOSLogin initialSetup installRecovery label="打开恢复画面" setupHint="先登录安装时创建的客机普通账户，再点击「打开 Apple Installer」。管理员认证用户名填 cagesetup，密码与 Cage 账户相同；系统提示时选择允许。" setupStatus="安装完成后返回 Cage 继续置备。" setupActions={<button disabled={busy} onClick={() => run(() => api("/macos/install-recovery", { action: "resume" }))}>打开 Apple Installer</button>} onSettings={() => setHelp(true)} />}
+            </section>}
+            {pending?.system === "macos" && macRecovery && !macRecovery.available && macRecovery.can_prepare && <section className="initialization-notice" aria-label="macOS 安装恢复">
+              <p>检测到未完成的 macOS 安装；macOS 27 需要你在客机中完成一次管理员授权，这是正常流程。后续恢复将沿用原客机磁盘。准备完成后，这里会出现继续安装的指引。</p>
+              <button disabled={busy} onClick={() => run(async () => { await api("/macos/install-recovery", { action: "prepare" }); pollNow.current?.(); })}>准备恢复入口</button>
+            </section>}
+            {pending?.system === "macos" && macRecovery && !macRecovery.available && !macRecovery.can_prepare && <section className="initialization-notice" aria-label="macOS 恢复入口不可用">
+              <p>检测到未完成的 macOS 安装；macOS 27 需要你在客机中完成一次管理员授权，这是正常流程。恢复入口尚未就绪，可能仍在准备中。可查看操作详情了解进度，或继续原安装；现有数据会保留。</p>
+              <button disabled={busy} onClick={() => setDetails(true)}>查看操作详情</button>
+              <button className="primary" disabled={busy || Boolean(connectionError)} onClick={install}>继续原安装</button>
+            </section>}
+            {pending?.system === "macos" && recoveryError && <section className="initialization-notice" role="alert" aria-label="恢复状态读取失败">
+              <p>暂时无法读取 macOS 安装恢复状态，安装进度不受影响。</p>
+              <p><SafetyMessage message={recoveryError} /></p>
+              <button disabled={busy} onClick={() => pollNow.current?.()}>重新检查</button>
+            </section>}
+            {job.error && !progress && !(status.guest_system === "macos" && networkPending) && <div className="initialization-notice" role="alert"><SafetyMessage message={job.error} />{!networkPending && !needsExitRestart && <button className="primary" disabled={busy || Boolean(connectionError)} onClick={install}>继续安装</button>}</div>}
             {status.guest_system === "macos" && status.vm_running && !status.ready && !busy && <section className="initialization-notice"><h2>连接虚拟 Mac</h2><p>{status.environment_update_error || "客机已经启动，尚未建立工作台连接。请先检查客机是否停在登录画面。"}</p><MacOSLogin onSessionClosed={() => pollNow.current?.()} /><button disabled={Boolean(connectionError)} onClick={install}>重新连接并检查</button></section>}
-            {status.ready && network.mode !== "open" && !busy && <>
-              {status.guest_system === "macos" && <InitializationChecks status={status} busy={Boolean(connectionError)} onWorkspace={setApprovalWorkspace} onCheck={checkNetwork} onStart={install} onRestart={restart} onBind={bindExit} onUpdate={() => run(() => api("/environment/update", {}))} onDiagnostics={() => setHelp(true)} />}
+            {status.ready && network.mode !== "open" && !busy && !needsExitRestart && <>
+              {status.guest_system === "macos" && <InitializationChecks status={status} busy={Boolean(connectionError)} onWorkspace={setApprovalWorkspace} onCheck={checkNetwork} onStart={install} onRestart={restart} onUpdate={() => run(() => api("/environment/update", {}))} onDiagnostics={() => setHelp(true)} />}
               <div className="initialization-network"><p>{status.safety?.error || job.error || status.network_error || "客机已经连接，请完成网络和隔离检查后进入工作台。"}</p><button disabled={Boolean(connectionError)} onClick={checkNetwork}>运行网络与隔离检查</button></div>
             </>}
             {(progress?.setup_progress.phase === "image" || (failed && !networkPending)) && <p>系统镜像和在主机上准备的 macOS 安装组件遵循主机代理设置。下载失败时，可在操作详情中查看当前文件和重试记录。客机内的联网请求使用 Cage 代理。</p>}
             <div className="initialization-recovery"><button onClick={() => setStep("proxy")} disabled={busy}>检查 Cage 代理配置</button>{!progress && <button onClick={() => setDetails(true)}>查看操作详情</button>}</div>
           </>)}
         </div>
-        {git && <section className="initialization-notice" aria-label="Git 安全保护"><h2>安装前，保护本机 Git</h2><p>{git.message}</p>{git.can_enable && <><p>启用后，Git 会忽略未经你明确指定的裸仓库。该操作会修改当前用户的全局设置，影响本机其他 Git 工具，普通项目保持原有操作。</p><pre>git config --global safe.bareRepository explicit</pre><button className="primary" disabled={busy} onClick={enableGit}>启用 Git 保护</button></>}<button disabled={busy} onClick={install}>重新检查并安装</button></section>}
         {error && <p className="initialization-notice" role="alert"><SafetyMessage message={error} /></p>}
         <footer className="initialization-actions">
           {step === "system" ? <span /> : <button className="text-button" disabled={busy} onClick={back}><ChevronLeft size={16} />上一步</button>}

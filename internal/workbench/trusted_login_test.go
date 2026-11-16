@@ -201,6 +201,9 @@ func TestTrustedLocalUnlockIsPrivateToDesktop(t *testing.T) {
 	if !a.viewFor(true).Unlocked || a.viewFor(false).Unlocked {
 		t.Fatal("trusted login escaped desktop view")
 	}
+	if _, allowed := a.accessFor(false, true); allowed {
+		t.Fatal("legacy passwordless workspace granted phone access")
+	}
 	if response := request(s, "GET", "/api/favorites", "", "", true); response.Code != http.StatusLocked {
 		t.Fatalf("session cookie alone opened favorites: %d", response.Code)
 	}
@@ -300,7 +303,7 @@ func TestTrustedLocalDesktopEntryAndWorkload(t *testing.T) {
 	if w.Code != http.StatusOK || !workload.account.viewFor(true).Unlocked || !workload.account.viewFor(false).Unlocked {
 		t.Fatalf("remembered password account did not restore remote access after reload: %d %s", w.Code, w.Body.String())
 	}
-	epoch, unlocked := workload.account.accessFor(false)
+	epoch, unlocked := workload.account.accessFor(false, false)
 	if !unlocked || epoch == nil || epoch.Err() != nil {
 		t.Fatal("remembered login did not restore the remote request lifetime")
 	}

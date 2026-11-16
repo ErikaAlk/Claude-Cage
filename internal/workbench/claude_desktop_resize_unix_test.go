@@ -18,10 +18,15 @@ func TestDesktopResizeScriptAppliesTheViewersDensity(t *testing.T) {
 	if runtime.GOOS != "linux" || err != nil {
 		t.Skip("the script identifies its settings manager through /proc")
 	}
-	// Go's temporary directory can be mounted noexec; the stand-ins must run.
-	root, err := os.MkdirTemp("/dev/shm", "cage-resize-")
+	// go test already executes its test binary from this filesystem. Both
+	// TMPDIR and /dev/shm can be mounted noexec independently of the Go build directory.
+	executable, err := os.Executable()
 	if err != nil {
-		root = t.TempDir()
+		t.Fatal(err)
+	}
+	root, err := os.MkdirTemp(filepath.Dir(executable), "cage-resize-")
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(root) })
 	desktop, phone, bin := filepath.Join(root, "desktop"), filepath.Join(root, "phone"), filepath.Join(root, "bin")
@@ -40,9 +45,10 @@ func TestDesktopResizeScriptAppliesTheViewersDensity(t *testing.T) {
 		data, _ := os.ReadFile(path)
 		return string(data)
 	}
-	write(filepath.Join(bin, "xrandr"), "#!/bin/sh\necho \"$*\" >> "+filepath.Join(root, "modes")+"\n", 0o700)
+	t.Setenv("CAGE_RESIZE_FIXTURE", root)
+	write(filepath.Join(bin, "xrandr"), "#!/bin/sh\necho \"$*\" >> \"$CAGE_RESIZE_FIXTURE/modes\"\n", 0o700)
 	// The script signals a process named xsettingsd.
-	write(filepath.Join(bin, "xsettingsd"), "#!/bin/sh\ntrap 'echo reload >> "+filepath.Join(root, "reloads")+"' HUP\nwhile :; do sleep 1 & wait $!; done\n", 0o700)
+	write(filepath.Join(bin, "xsettingsd"), "#!/bin/sh\ntrap 'echo reload >> \"$CAGE_RESIZE_FIXTURE/reloads\"' HUP\nwhile :; do sleep 1 & wait $!; done\n", 0o700)
 	resize := func(scale string) string {
 		t.Helper()
 		script := strings.NewReplacer("/run/cage-desktop", desktop, "/run/cage-phone-desktop", phone).Replace(desktopResizeScript(1000, 800, scale))
@@ -95,7 +101,8 @@ func TestDesktopResizeScriptAppliesTheViewersDensity(t *testing.T) {
 	if output := resize("1.25"); output != "scale 1.25\n" {
 		t.Fatalf("applied density not reported: %q", output)
 	}
-	if conf := read(filepath.Join(desktop, "xsettings.conf")); !strings.HasPrefix(conf, "Xft/DPI 122880\n") || !strings.Contains(conf, "Gdk/UnscaledDPI 122880\n") {
+	// A session of an earlier version keeps the one setting it had.
+	if conf := read(filepath.Join(desktop, "xsettings.conf")); conf != "Xft/DPI 122880\nGdk/WindowScalingFactor 1\nGdk/UnscaledDPI 122880\nGtk/DecorationLayout \":\"\n" {
 		t.Fatalf("settings: %q", conf)
 	}
 	if read(filepath.Join(desktop, "display-scale")) != "1.25\n" || read(filepath.Join(desktop, "desktop-size")) != "1000 800 1.25\n" {
@@ -106,11 +113,19 @@ func TestDesktopResizeScriptAppliesTheViewersDensity(t *testing.T) {
 	resize("1.25")
 	reloads(1)
 
+	// A density change keeps the session's other settings, such as reduced animations.
+	write(filepath.Join(desktop, "xsettings.fixed"), "Gtk/DecorationLayout \":\"\nGtk/EnableAnimations 0\n", 0o600)
+	resize("1.5")
+	if conf := read(filepath.Join(desktop, "xsettings.conf")); conf != "Xft/DPI 147456\nGdk/WindowScalingFactor 1\nGdk/UnscaledDPI 147456\nGtk/DecorationLayout \":\"\nGtk/EnableAnimations 0\n" {
+		t.Fatalf("settings: %q", conf)
+	}
+	reloads(2)
+
 	// A viewer that names no density gets the configured one back.
 	if output := resize(""); output != "" || !strings.HasPrefix(read(filepath.Join(desktop, "xsettings.conf")), "Xft/DPI 196608\n") {
 		t.Fatalf("configured density not restored: %q", output)
 	}
-	reloads(2)
+	reloads(3)
 
 	// While a phone holds the display the request is kept for its release.
 	write(filepath.Join(phone, "layout.json"), "{}", 0o600)
@@ -121,5 +136,5 @@ func TestDesktopResizeScriptAppliesTheViewersDensity(t *testing.T) {
 	if read(filepath.Join(desktop, "display-scale")) != "2\n" || read(filepath.Join(root, "modes")) != modes {
 		t.Fatal("a held display was changed")
 	}
-	reloads(2)
+	reloads(3)
 }

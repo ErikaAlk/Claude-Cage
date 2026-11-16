@@ -3,17 +3,17 @@ package workbench
 import (
 	"bufio"
 	"bytes"
+	"compress/zlib"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +25,25 @@ import (
 )
 
 const clipboardWireLimit = 30 << 20
+
+// 保留当前后端配套的客机脚本，使已有 Linux 客机也能建立剪贴板连接。
+// 将脚本压缩为单个参数，避免完整脚本经过两层转义后超出 Windows 进程命令行上限。
+var linuxClipboardCommand = sync.OnceValues(func() (string, error) { return compressedClipboardCommand(cage.SharedClipboardHelper) })
+
+func compressedClipboardCommand(script string) (string, error) {
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := io.WriteString(writer, script); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+	// 移除载荷参数后，辅助脚本仍收到原有操作参数，stdin 也仍用于剪贴板协议。
+	const bootstrap = `import base64,sys,zlib; exec(compile(zlib.decompress(base64.b64decode(sys.argv.pop(1))), '<cage-shared-clipboard>', 'exec'))`
+	return "exec sudo -n /usr/bin/python3 -c " + shellescape.Quote(bootstrap) + " " +
+		base64.StdEncoding.EncodeToString(compressed.Bytes()), nil
+}
 
 type clipboardPayload struct {
 	Hello   *clipboardHello `json:"hello,omitempty"`
@@ -84,10 +103,14 @@ func (s *Server) clipboardCommand(ctx context.Context, operation string, selecti
 		}
 		return cmd, "guest", nil
 	}
-	// 脚本通过标准输入传输，避免超过 Windows 命令行长度限制。
-	// 精确读取脚本字节数，保留后续剪贴板消息和文件数据。
-	loader := fmt.Sprintf("import os\ns=b''\nwhile len(s)<%d:\n c=os.read(0,%d-len(s))\n if not c: raise EOFError('Clipboard helper truncated')\n s+=c\nexec(compile(s, 'cage-shared-clipboard', 'exec'))", len(cage.SharedClipboardHelper), len(cage.SharedClipboardHelper))
-	command := "exec sudo -n /usr/bin/python3 -c " + shellescape.Quote(loader)
+	helper, err := s.linuxTemplate(cage.SharedClipboardHelper)
+	if err != nil {
+		return nil, "", err
+	}
+	command, err := compressedClipboardCommand(helper)
+	if err != nil {
+		return nil, "", err
+	}
 	switch operation {
 	case "stream":
 	case "import":
@@ -104,10 +127,9 @@ func (s *Server) clipboardCommand(ctx context.Context, operation string, selecti
 		return nil, "", errors.New("剪贴板操作无效")
 	}
 	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
-	cmd.Stdin = strings.NewReader(cage.SharedClipboardHelper)
 	if operation == "export" {
 		data, _ := json.Marshal(selection.Paths)
-		cmd.Stdin = io.MultiReader(cmd.Stdin, bytes.NewReader(data))
+		cmd.Stdin = bytes.NewReader(data)
 	}
 	return cmd, "cage", nil
 }
@@ -239,13 +261,12 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { cancel(); s.mu.Lock(); s.clipboardCancel = nil; s.clipboardRelease = nil; s.mu.Unlock() }()
+	// 以当前后端配套的辅助脚本启动连接，保留 stdin/stdout 传输剪贴板数据。
 	cmd, source, err := s.clipboardCommand(ctx, "stream", clipboardFileSelection{})
 	if err != nil {
 		http.Error(w, "剪贴板客机配置无效", 502)
 		return
 	}
-	bootstrap := cmd.Stdin
-	cmd.Stdin = nil
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		http.Error(w, "剪贴板连接失败", 502)
@@ -264,12 +285,6 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { cancel(); in.Close(); out.Close(); _ = cmd.Wait() }()
-	if bootstrap != nil {
-		if _, err := io.Copy(in, bootstrap); err != nil {
-			http.Error(w, "剪贴板连接初始化失败", http.StatusBadGateway)
-			return
-		}
-	}
 	ws, err := s.upgrade(w, r)
 	if err != nil {
 		return
@@ -424,12 +439,7 @@ func (s *Server) clipboardArchive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "传递剪贴板文件失败", 502)
 		return
 	}
-	archive := http.MaxBytesReader(w, r.Body, 201<<30)
-	if cmd.Stdin == nil {
-		cmd.Stdin = archive
-	} else {
-		cmd.Stdin = io.MultiReader(cmd.Stdin, archive)
-	}
+	cmd.Stdin = http.MaxBytesReader(w, r.Body, 201<<30)
 	out, err := cmd.StdoutPipe()
 	if err != nil || cmd.Start() != nil {
 		http.Error(w, "传递剪贴板文件失败", 502)

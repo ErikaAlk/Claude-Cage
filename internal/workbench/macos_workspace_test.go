@@ -6,17 +6,21 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/kballard/go-shellquote"
@@ -180,6 +184,8 @@ func (g *macWorkspaceGuest) execute(channel ssh.Channel, command string) uint32 
 		json.NewEncoder(channel).Encode(macOSResourceSample{Version: 1, Total: 4 << 30, Available: 2 << 30,
 			Free: 1 << 30, Inactive: 1 << 30, CPUs: 2, Boot: 10, CPUTicks: [4]uint32{ticks, 10, 80 + ticks, 0}})
 		return 0
+	case command == "/usr/bin/open -a /Applications/CageProjectAccess.app":
+		return 0
 	case strings.HasPrefix(command, "set -e;"):
 		return 0
 	case strings.HasPrefix(command, "exec /usr/local/libexec/cage-sshfs "):
@@ -313,6 +319,77 @@ func TestMacOSProjectOpenWithRequiresSSHFSCapability(t *testing.T) {
 	}
 }
 
+func TestMacOSLegacyFSKitCleanupPinsRegistryIdentity(t *testing.T) {
+	const id = "0x100000504"
+	var guest *macWorkspaceGuest
+	cleanup := make(chan string, 1)
+	guest = newMacWorkspaceGuest(t, func(channel ssh.Channel, command string) (uint32, bool) {
+		if strings.HasPrefix(command, "exec /bin/bash --noprofile --norc -c ") {
+			args, err := shellquote.Split(command)
+			if err != nil {
+				return 1, true
+			}
+			command = args[len(args)-1]
+		}
+		switch {
+		case strings.HasPrefix(command, "/sbin/mount |"):
+			fmt.Fprintf(channel, "/dev/disk8s1 on %s (macfuse, local, nodev, nosuid, noowners, fskit, mounted by cage)\n", guest.guestPath)
+			return 0, true
+		case strings.HasPrefix(command, "/usr/sbin/ioreg -r -c IOMedia "):
+			fmt.Fprintln(channel, id)
+			return 0, true
+		case strings.HasPrefix(command, "if test "):
+			cleanup <- command
+			return 0, true
+		}
+		return 0, false
+	})
+	guest.approved.Store(true)
+	if err := guest.s.ensureMacOSProjectShare(guest.hostPath); err != nil {
+		t.Fatal(err)
+	}
+	guest.s.closeProjectShares()
+	var command string
+	select {
+	case command = <-cleanup:
+	case <-time.After(time.Second):
+		t.Fatal("project cleanup did not run")
+	}
+	if !strings.Contains(command, "ioreg -r -c IOMedia") || !strings.Contains(command, id) || !strings.Contains(command, "disk8s1") {
+		t.Fatal("legacy FSKit cleanup could detach a replacement using the same BSD device")
+	}
+}
+
+func TestMacOSLegacyFSKitRejectsInvalidRegistryIdentity(t *testing.T) {
+	for _, value := range []string{"", "0x0", "12", "0x1; touch /tmp/invalid", "0x123\n0x124", strings.Repeat("a", 33)} {
+		if _, err := macOSLegacyMountID([]byte(value)); err == nil {
+			t.Fatalf("accepted invalid media identity: %q", value)
+		}
+	}
+}
+
+func TestMacOSMediaRegistryParserHandlesSubclassesAndLabels(t *testing.T) {
+	perl, err := exec.LookPath("perl")
+	if err != nil {
+		t.Skip("requires the system Perl used by macOS")
+	}
+	for _, test := range []struct{ name, input, want string }{
+		{"regular", "+-o Media <class IOMedia, id 0x101, registered>\n    \"BSD Name\" = \"disk4s1\"\n", "0x101\n"},
+		{"reused-name-subclass", "+-o Old <class IOMedia, id 0x101, registered>\n    \"BSD Name\" = \"disk3s1\"\n+-o New <class AppleAPFSMedia, id 0x202, registered>\n    \"BSD Name\" = \"disk4s1\"\n", "0x202\n"},
+		{"untrusted-label", "+-o Media <class IOMedia, id 0x303, registered>\n    \"Label\" = \"<class IOMedia, id 0x999, fake>\"\n    \"BSD Name\" = \"disk4s1\"\n", "0x303\n"},
+		{"missing", "+-o Media <class IOMedia, id 0x101, registered>\n    \"BSD Name\" = \"disk3s1\"\n", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(perl, "-e", macOSMediaIdentityMatch, "disk4s1")
+			command.Stdin = strings.NewReader(test.input)
+			out, err := command.Output()
+			if strings.ReplaceAll(string(out), "\r\n", "\n") != test.want || (err != nil) != (test.want == "") {
+				t.Fatalf("registry identity %q, %v; want %q", out, err, test.want)
+			}
+		})
+	}
+}
+
 func TestMacOSDefaultWorkspaceUsesApprovedSharedProject(t *testing.T) {
 	guest := newMacWorkspaceGuest(t)
 	s := guest.s
@@ -440,5 +517,59 @@ func TestMacOSDefaultWorkspaceNewAndLegacyConversations(t *testing.T) {
 		if s.macOSLegacyWorkspace(record) != "" {
 			t.Fatal("legacy compatibility accepted an unrelated or unbound directory")
 		}
+	}
+}
+
+func TestMacOSProjectOpenRestoresPendingApprovalWindow(t *testing.T) {
+	var activations atomic.Int32
+	var activationFails atomic.Bool
+	guest := newMacWorkspaceGuest(t, func(channel ssh.Channel, command string) (uint32, bool) {
+		if strings.Contains(command, "/usr/bin/open -a /Applications/CageProjectAccess.app") {
+			activations.Add(1)
+			if activationFails.Load() {
+				return 1, true
+			}
+			return 0, true
+		}
+		return 0, false
+	})
+	s := guest.s
+	s.restoreProjectShares()
+	share := s.projectShares[guest.hostPath]
+	if share == nil || share.approval == "" {
+		t.Fatal("expected a pending project authorization")
+	}
+	grant := share.approval
+	if err := s.ensureProjectShare(guest.hostPath); !errors.Is(err, errMacOSProjectApproval) {
+		t.Fatalf("background project probe: %v", err)
+	}
+	if activations.Load() != 0 {
+		t.Fatal("background project recovery stole guest focus")
+	}
+	body, _ := json.Marshal(map[string]any{"workspace": guest.hostPath, "add": false})
+	open := func() *httptest.ResponseRecorder {
+		return windowsBrowserRequestForTest(s, http.MethodPost, "/api/projects/open", body)
+	}
+	response := open()
+	var pending struct{ Workspace, Approval string }
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &pending) != nil || pending.Approval != grant || pending.Workspace != guest.hostPath {
+		t.Fatalf("pending project open: %d %s", response.Code, response.Body.String())
+	}
+	if activations.Load() != 1 || share.detach != nil {
+		t.Fatal("explicit project open did not show the pending window without approving it")
+	}
+	activationFails.Store(true)
+	response = open()
+	if response.Code == http.StatusOK || share.approval != grant || s.projectShares[guest.hostPath] != share || share.detach != nil {
+		t.Fatal("failed window activation lost its pending grant or reported success")
+	}
+	activationFails.Store(false)
+	guest.approved.Store(true)
+	response = open()
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "approval") || share.detach == nil {
+		t.Fatalf("approved project open: %d %s", response.Code, response.Body.String())
+	}
+	if activations.Load() != 2 {
+		t.Fatal("opening an approved project stole guest focus")
 	}
 }
