@@ -487,6 +487,8 @@ button.large {
   resize: none;
   font: 16px/24px system-ui;
 }
+.browser-extension-button { width: 30px; height: 30px; flex-shrink: 0; }
+.browser-extension-button img { width: 16px; height: 16px; object-fit: contain; }
 .concealed {
   visibility: hidden;
   pointer-events: none;

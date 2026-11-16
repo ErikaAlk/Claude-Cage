@@ -5,7 +5,7 @@ import { createTailnetClient } from "./tailnet-client.mjs";
 // The GUI-session broker owns this process. Playwright uses inherited DevTools
 // pipes; neither the controller nor DevTools opens a guest network listener.
 import { randomBytes, randomUUID } from "node:crypto";
-import { constants, createReadStream, existsSync } from "node:fs";
+import { constants, createReadStream, existsSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -87,11 +87,13 @@ async function navigateOrDownload(page, navigate) {
     page.off("download", onDownload);
   }
 }
-export function checkedBrowserURL(value) {
+export function checkedBrowserURL(value, protectedID = "") {
   if (typeof value !== "string" || value.length > 4096) throw failure("invalid_url", "浏览器地址无效");
   if (value === "about:blank") return value;
   let url;
   try { url = new URL(value); } catch { throw failure("invalid_url", "浏览器地址无效"); }
+  if (url.protocol === "chrome-extension:" && /^[a-p]{32}$/.test(url.hostname) && url.hostname !== protectedID && !url.username && !url.password && !url.port)
+    return url.href;
   if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password)
     throw failure("invalid_url", "Only HTTP(S) URLs without credentials are accepted");
   return url.href;
@@ -151,6 +153,8 @@ export function createNativeBrowserService(options = {}) {
   const uploadDirectory = path.join(directory, "Uploads");
   const destination = options.downloadDirectory ?? path.join(homedir(), "Downloads", "Cage");
   let context, owner, browserCDP, initialized, closing, proxy, networkMode = "proxy", configured = false;
+  let controllerID = "";
+  const checkedURL = value => checkedBrowserURL(value, controllerID);
   let active = "", home = options.homepage ?? "https://www.bing.com/", displayScale = options.displayScale ?? 2;
   // The density the controller starts with. A viewer that names its own
   // screen's density replaces displayScale; one that names none restores this.
@@ -184,6 +188,9 @@ export function createNativeBrowserService(options = {}) {
   let creationProfile;
   let viewport = { width: 1140, height: 700 }, persistQueue = Promise.resolve();
   const tabs = new Map(), byPage = new WeakMap(), sessions = new Map(), frameSessions = new WeakMap(), internalPages = new WeakSet();
+  const appearanceFile = path.join(directory, "browser-appearance.json");
+  let colorScheme = existsSync(appearanceFile) ? JSON.parse(readFileSync(appearanceFile, "utf8")).colorScheme : "light";
+  if (!["light", "dark"].includes(colorScheme)) throw failure("invalid_input", "浏览器配色无效");
   const captures = new Map(), stoppingCaptures = new Map();
   let activeRequests = 0;
   const events = [], transfers = new Map(), privateContexts = new Set(), editorConnections = new Map(), logins = new Map();
@@ -660,6 +667,7 @@ export function createNativeBrowserService(options = {}) {
     // Its context may have been created for another viewer's density.
     followDensity(page.context());
     await page.setViewportSize(viewport);
+    await page.emulateMedia({ colorScheme });
     const connection = await page.context().newCDPSession(page), sid = token();
     if (page.isClosed()) { await connection.detach().catch(() => {}); return; }
     tab.session = sid; sessions.set(sid, connection); frameSessions.set(page.mainFrame(), sid);
@@ -731,21 +739,25 @@ export function createNativeBrowserService(options = {}) {
       await rm(uploadDirectory, { recursive: true, force: true });
       const splitDirectory = options.splitDirectory ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "split-extension");
       const extensionTools = !options.remoteHeadless && typeof modules.BrowserExtensions === "function" && existsSync(path.join(splitDirectory, "manifest.json"));
+      controllerID = extensionTools ? nativeExtensionIDForPath(splitDirectory) : "";
+      let extensionControl;
+      const startupExtensions = extensionTools ? new modules.BrowserExtensions({ directory, cdp,
+        control: (...args) => extensionControl(...args), protectedID: controllerID,
+        extractArchive: extractWindowsExtensionArchive, idForPath: nativeExtensionIDForPath }) : undefined;
       try {
         context = await chromium.launchPersistentContext(options.profileDirectory ?? path.join(directory, "Profile"), {
           executablePath: options.executablePath ?? browserExecutable(), headless: mac || options.remoteHeadless === true || (options.testing === true && options.headless !== false),
           chromiumSandbox: true, viewport, deviceScaleFactor: displayScale, acceptDownloads: true,
           ...(timezone ? { timezoneId: timezone } : {}), ...(language ? { locale: language } : {}),
           ...contextProxy(),
-          // CDP transports the user's input. Preserve the native browser identity
-          // in every context, including private pages that cannot load extensions.
-          args: [...(creationProfile ? browserProfileFlags(creationProfile, mac ? "darwin" : options.testing ? process.platform : "win32") : []),"--disable-blink-features=AutomationControlled", "--disable-quic", "--no-first-run", "--no-default-browser-check", "--restore-last-session", "--disable-session-crashed-bubble", ...(!options.remoteHeadless ? ["--host-resolver-rules=MAP *.cage-editor.localhost 127.0.0.1"] : []), ...(networkMode === "packet" ? ["--no-proxy-server"] : []), ...(extensionTools ? ["--enable-unsafe-extension-debugging", `--load-extension=${splitDirectory}`] : [])],
+          args: [...(creationProfile ? browserProfileFlags(creationProfile, mac ? "darwin" : options.testing ? process.platform : "win32") : []), "--disable-quic", "--no-first-run", "--no-default-browser-check", "--restore-last-session", "--disable-session-crashed-bubble", ...(!options.remoteHeadless ? ["--host-resolver-rules=MAP *.cage-editor.localhost 127.0.0.1"] : []), ...(networkMode === "packet" ? ["--no-proxy-server"] : []), ...(extensionTools ? ["--enable-unsafe-extension-debugging", `--load-extension=${[splitDirectory, ...startupExtensions.launchPaths()].join(',')}`] : [])],
           ignoreDefaultArgs: ["--enable-automation", ...(extensionTools ? ["--disable-extensions"] : []), ...(mac ? ["--mute-audio"] : [])], timeout: 20000,
         });
       } catch (error) { if (error.code) throw error; throw failure("browser_unavailable", "Windows 客机图形浏览器未能启动，请检查 GUI 会话和安装组件"); }
       context.setDefaultTimeout(7000); owner = context.browser();
       if (!owner) throw failure("browser_unavailable", "Windows 客机浏览器控制连接未就绪");
       browserCDP = await owner.newBrowserCDPSession();
+      if (startupExtensions) await startupExtensions.restore();
       clipboard = new modules.BrowserClipboard(cdp, observeCopy, { includeChanges: mac, source: async () => {
         const page = await privateClipboardPage();
         const connection = await page.context().newCDPSession(page);
@@ -781,7 +793,7 @@ export function createNativeBrowserService(options = {}) {
       const used = new Set();
       if (Array.isArray(saved?.tabs) && saved.tabs.length <= 100) for (const entry of saved.tabs) {
         try {
-          const url = checkedBrowserURL(entry.url); if (!tokenPattern.test(entry.id)) continue;
+          const url = checkedURL(entry.url); if (!tokenPattern.test(entry.id)) continue;
           let tab = [...tabs.values()].find(t => !used.has(t) && t.page.url() === url);
           if (!tab) {
             const page = await context.newPage(); tab = await addPage(page, { id: entry.id, kind: entry.kind === "browser-settings" ? "browser-settings" : "web" });
@@ -821,8 +833,10 @@ export function createNativeBrowserService(options = {}) {
             }
             return controller.session;
           };
-          extensions = new modules.BrowserExtensions({ directory, cdp, control, protectedID, extractArchive: extractWindowsExtensionArchive, idForPath: nativeExtensionIDForPath });
-          await control(); await extensions.restore();
+          if (protectedID !== controllerID) throw failure("extensions_unavailable", "浏览器控制扩展标识不一致");
+          extensionControl = control;
+          extensions = startupExtensions;
+          await control();
         } catch { extensions = undefined; }
       }
       context.on("close", () => { context = undefined; initialized = undefined; tabs.clear(); sessions.clear(); active = ""; });
@@ -1414,7 +1428,7 @@ export function createNativeBrowserService(options = {}) {
       } finally { await isolated.close(); await tabs.get(active)?.page.bringToFront(); }
     }
     if (action === "new") {
-      const url = checkedBrowserURL(input.url || home); let page;
+      const url = checkedURL(input.url || home); let page;
       if (input.incognito) {
         const privateContext = await owner.newContext({ viewport, deviceScaleFactor: displayScale, acceptDownloads: true, ...(timezone ? { timezoneId: timezone } : {}), ...(language ? { locale: language } : {}), ...contextProxy() });
         privateContexts.add(privateContext);
@@ -1429,7 +1443,7 @@ export function createNativeBrowserService(options = {}) {
       remember(); return { id: tab.id };
     }
     if (action === "homepage") {
-      home = checkedBrowserURL(input.url);
+      home = checkedURL(input.url);
       for (const tab of tabs.values()) await restoreHomepage(tab.page);
       return { ok: true };
     }
@@ -1497,6 +1511,13 @@ export function createNativeBrowserService(options = {}) {
     if (action === "download-retry") return downloads.retry(input.id);
     if (action === "settings") {
       const mode = input.mode || "general";
+      if (mode === "color-scheme") {
+        if (!["light", "dark"].includes(input.text)) throw failure("invalid_input", "浏览器配色无效");
+        colorScheme = input.text;
+        for (const tab of tabs.values()) if (tab.page) await tab.page.emulateMedia({ colorScheme });
+        await writeFile(appearanceFile, JSON.stringify({ colorScheme }), { mode: 0o600 });
+        return { ok: true, colorScheme };
+      }
       if (!["general", "appearance", "privacy", "extensions", "about"].includes(mode)) throw failure("invalid_input", "设置分类无效");
       let tab = [...tabs.values()].find(t => t.kind === "browser-settings");
       if (!tab) tab = await addPage(await context.newPage(), { kind: "browser-settings" });
@@ -1512,13 +1533,22 @@ export function createNativeBrowserService(options = {}) {
     if (action === "extensions") {
       if (!extensions) throw failure("extensions_unavailable", "Windows 扩展管理组件未就绪，请核对浏览器版本和安装组件");
       const result = await extensions.request(input);
-      if (input.mode === "options" && result.url) {
+      if (result.action) throw failure("action_unavailable", "此环境不支持原生扩展弹窗，请使用扩展页面入口");
+      if (["options", "open"].includes(input.mode) && result.url) {
         if (!result.url.startsWith(`chrome-extension://${input.id}/`)) throw failure("invalid_input", "扩展设置地址无效");
         const tab = await addPage(await context.newPage()); await tab.page.goto(result.url, { waitUntil: "commit", timeout: 7000 }); await activate(tab.id); return { id: tab.id, url: result.url, kind: "web", title: "扩展选项" };
       }
       return result;
     }
-    if (action === "info") return browserCDP.send("Browser.getVersion");
+    if (action === "info") {
+      const version = await browserCDP.send("Browser.getVersion");
+      if (!tabs.has(active)) return { ...version, colorScheme };
+      const tab = target({ id: active }, false);
+      const dark = await tab.page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches);
+      const { frameTree } = await cdp("Page.getFrameTree", {}, tab.session);
+      return { ...version, colorScheme, pageColorScheme: dark ? "dark" : "light",
+        pageURL: frameTree.frame.url, unreachableURL: frameTree.frame.unreachableUrl || "" };
+    }
     if (action === "cookies") {
       const tab = target(input, false);
       if (typeof cookieActions !== "function") throw failure("action_unavailable", "Windows Cookie 组件尚未完整安装");
@@ -1555,7 +1585,7 @@ export function createNativeBrowserService(options = {}) {
     }
     if (action === "activate") return activate(tab.id);
     if (action === "close") { await page.close(); if (!tabs.size) await addPage(await context.newPage()); if (active) await activate(active); return { ok: true }; }
-    if (action === "navigate") { await navigateOrDownload(page, () => page.goto(checkedBrowserURL(input.url), { waitUntil: "commit", timeout: 8000 })); remember(); return { ok: true }; }
+    if (action === "navigate") { await navigateOrDownload(page, () => page.goto(checkedURL(input.url), { waitUntil: "commit", timeout: 8000 })); remember(); return { ok: true }; }
     if (action === "reload") { await navigateOrDownload(page, () => page.reload({ waitUntil: "commit", timeout: 8000 })); return { ok: true }; }
     if (action === "back") { await navigateOrDownload(page, () => page.goBack({ waitUntil: "commit", timeout: 8000 })); return { ok: true }; }
     if (action === "forward") { await navigateOrDownload(page, () => page.goForward({ waitUntil: "commit", timeout: 8000 })); return { ok: true }; }

@@ -25,8 +25,11 @@ const config = JSON.parse(
   readFileSync("/etc/claude-cage/browser-control.json", "utf8"),
 );
 const displayScale = config.display_scale === 1.5 ? 1.5 : 2;
+const appearanceFile = "/home/cage-browser/browser-appearance.json";
+let colorScheme = existsSync(appearanceFile) ? JSON.parse(readFileSync(appearanceFile, "utf8")).colorScheme : "light";
+if (!["light", "dark"].includes(colorScheme)) throw new Error("浏览器配色无效");
 // Started before Chromium, which then opens at this density.
-const displaySettings = createDisplaySettings({ file: "/home/cage-browser/.cache/cage-display/xsettings.conf", initial: displayScale });
+const displaySettings = createDisplaySettings({ file: "/home/cage-browser/.cache/cage-display/xsettings.conf", initial: displayScale, colorScheme });
 process.on("exit", () => displaySettings.close());
 const selectionFile = "/home/cage-browser/workbench-state.json";
 const homepageFile = "/home/cage-browser/homepage.json";
@@ -62,6 +65,7 @@ const isSettingsTab = tab => tab.url === settingsURL || tab.url.startsWith(setti
 const publicURL = tab => isSettingsTab(tab) ? "cage://settings" + new URL(tab.url).hash : tab.url;
 let splitView = null, splitSession, splitTarget, splitOpening, resizeTimer;
 const favicons = new Map(), faviconRequests = new Map(), documents = new Map();
+const tabContainerPages = new Map();
 
 function isBrowserTab(target) {
   return target.type === "page" && target.url !== splitURL &&
@@ -70,13 +74,11 @@ function isBrowserTab(target) {
     !auditExclusions.has(target.targetId) && !auditExclusions.has(target.url);
 }
 
+const browserExtensions = new BrowserExtensions({ directory: "/home/cage-browser", cdp, control: splitController, protectedID: extensionId });
 const flags = [
-  `--load-extension=${splitDirectory}`,
+  `--load-extension=${[splitDirectory, ...browserExtensions.launchPaths()].join(',')}`,
   "--user-data-dir=/home/cage-browser/profile",
   "--remote-debugging-pipe",
-  // The pipe carries user interaction. Set this before any document is created
-  // so normal pages, login popups and private contexts share the native getter.
-  "--disable-blink-features=AutomationControlled",
   // Kiosk mode blocks Chromium's DevTools UI, including F12. Ordinary
   // fullscreen keeps the guest browser chrome hidden while allowing inspection.
   "--start-fullscreen",
@@ -107,7 +109,6 @@ const auditExclusions = new Set();
 const auditCreations = new Set(), deferredTargetInfo = new Map();
 const loginBrowser = new LoginBrowser(cdp);
 const privateBrowser = new PrivateBrowser(cdp, downloadPath);
-const browserExtensions = new BrowserExtensions({ directory: "/home/cage-browser", cdp, control: splitController, protectedID: extensionId });
 const pending = new Map(),
   targets = new Map(),
   sessions = new Map();
@@ -203,7 +204,7 @@ function cdp(method, params = {}, sessionId, timeout = 4500) {
     const id = ++sequence;
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`Browser command timed out: ${method}`));
+      reject(new Error(`浏览器命令超时：${method.replaceAll('.', '/')}`));
     }, timeout);
     pending.set(id, { resolve, reject, timer });
     chrome.stdio[3].write(
@@ -287,6 +288,8 @@ chrome.stdio[4].on("data", (chunk) => {
         : call.resolve(event.result);
       continue;
     }
+    if (event.method === 'Target.attachedToTarget' && event.params.targetInfo.type === 'page')
+      tabContainerPages.set(event.sessionId, event.params.targetInfo.targetId);
     vault.event(event);
     const p = event.params || {};
     browserClipboard.event(event);
@@ -389,6 +392,7 @@ async function session(id) {
       cdp("Target.attachToTarget", { targetId: id, flatten: true }).then(async (r) => {
         uploadSessions.set(r.sessionId, id);
         await cdp("Page.enable", {}, r.sessionId);
+        await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: colorScheme }] }, r.sessionId);
         await cdp("Page.setInterceptFileChooserDialog", { enabled: true }, r.sessionId);
         await browserClipboard.attach(r.sessionId, id).then(result => {
           if (result?.skipped.length) console.warn("Browser copy observer skipped a modified or replaced document; reload the page to enable copy buttons.");
@@ -529,8 +533,18 @@ async function activate(id, focus = false) {
   rememberSelection();
   broadcastState(focus);
 }
+async function navigatePage(id, url) {
+  const result = await cdp("Page.navigate", { url, transitionType: "typed" }, await session(id));
+  if (result.errorText && !result.isDownload) throw new Error("网页导航失败：" + result.errorText);
+  return result;
+}
 function checkedURL(value) {
   if (value === "about:blank") return value;
+  if (/^chrome-extension:/i.test(value)) {
+    const url = new URL(value);
+    if (url.protocol === "chrome-extension:" && /^[a-p]{32}$/.test(url.hostname) &&
+        url.hostname !== extensionId && !url.username && !url.password && !url.port) return url.href;
+  }
   if (/^https?:\/\//i.test(value)) {
     const url = new URL(value);
     if (url.username || url.password) throw new Error("Only HTTP(S) URLs without credentials are accepted");
@@ -548,7 +562,7 @@ async function newTab(url = homeURL, incognito = false) {
       targets.set(tab.targetId, tab);
       await activate(tab.targetId, true);
     });
-    await cdp("Page.navigate", { url: address }, await session(result.id));
+    await navigatePage(result.id, address);
     return result;
   }
   const { targetId } = await cdp("Target.createTarget", {
@@ -559,7 +573,7 @@ async function newTab(url = homeURL, incognito = false) {
   if (!targets.has(targetId))
     targets.set(targetId, { targetId, type: "page", url: "about:blank", title: "" });
   await activate(targetId, true);
-  await cdp("Page.navigate", { url: address }, await session(targetId));
+  await navigatePage(targetId, address);
   return { id: targetId };
 }
 async function browserSettings(section = "general") {
@@ -923,19 +937,56 @@ const server = http.createServer(async (req, res) => {
         return { ok: true };
       }
       if (req.url === "/split") return setSplit(input);
-      if (req.url === "/settings") return browserSettings(input.mode || "general");
+      if (req.url === "/settings") {
+        if (input.mode !== "color-scheme") return browserSettings(input.mode || "general");
+        if (!["light", "dark"].includes(input.text)) throw new Error("浏览器配色无效");
+        colorScheme = input.text;
+        displaySettings.theme(colorScheme);
+        for (const pending of sessions.values()) {
+          const sid = await pending;
+          await cdp("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: colorScheme }] }, sid);
+        }
+        writeFileSync(appearanceFile, JSON.stringify({ colorScheme }), { mode: 0o600 });
+        return { ok: true, colorScheme };
+      }
       if (req.url === "/info") {
         const { product, protocolVersion } = await cdp("Browser.getVersion");
-        return { product, protocolVersion };
+        if (!targets.has(activeId)) return { product, protocolVersion, colorScheme };
+        const sid = await session(activeId);
+        const media = await cdp("Runtime.evaluate", { expression: "matchMedia('(prefers-color-scheme: dark)').matches", returnByValue: true }, sid);
+        const { frameTree } = await cdp("Page.getFrameTree", {}, sid);
+        return { product, protocolVersion, colorScheme, pageColorScheme: media.result.value ? "dark" : "light",
+          pageURL: frameTree.frame.url, unreachableURL: frameTree.frame.unreachableUrl || "" };
       }
       if (req.url === "/extensions") {
         const result = await browserExtensions.request(input);
-        if (input.mode === "options" && result.url) {
+        if (result.action) {
+          const targetId = input.target || activeId;
+          if (!targets.has(targetId) || isSettingsTab(targets.get(targetId))) throw new Error("请先选择网页标签");
+          await activate(targetId, true);
+          const { targetInfos } = await cdp('Target.getTargets', { filter: [{ type: 'tab' }] });
+          let containerId;
+          for (const tab of targetInfos) {
+            const { sessionId } = await cdp('Target.attachToTarget', { targetId: tab.targetId, flatten: true });
+            try {
+              await cdp('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: [{ type: 'page' }] }, sessionId);
+              if (tabContainerPages.get(sessionId) === targetId) containerId = tab.targetId;
+            } finally {
+              tabContainerPages.delete(sessionId);
+              await cdp('Target.detachFromTarget', { sessionId });
+            }
+            if (containerId) break;
+          }
+          if (!containerId) throw new Error('未找到扩展操作对应的浏览器标签');
+          await cdp("Extensions.triggerAction", { id: input.id, targetId: containerId });
+          return { ok: true };
+        }
+        if (["options", "open"].includes(input.mode) && result.url) {
           if (!result.url.startsWith(`chrome-extension://${input.id}/`)) throw new Error("扩展设置地址无效");
           const { targetId } = await cdp("Target.createTarget", { url: result.url });
           if (!targets.has(targetId)) targets.set(targetId, { targetId, type: "page", url: result.url });
           await activate(targetId, true);
-          return { id: targetId, url: result.url, kind: "web", title: "扩展选项" };
+          return { id: targetId, url: result.url, kind: "web", title: input.mode === "open" ? "浏览器扩展" : "扩展选项" };
         }
         return result;
       }
@@ -1016,11 +1067,7 @@ const server = http.createServer(async (req, res) => {
           break;
         }
         case "/navigate":
-          await cdp(
-            "Page.navigate",
-            { url: checkedURL(input.url) },
-            await session(id),
-          );
+          await navigatePage(id, checkedURL(input.url));
           break;
         case "/reload":
           await cdp("Page.reload", {}, await session(id));
@@ -1054,6 +1101,7 @@ server.listen(18500, "127.0.0.1");
   // A cold guest can spend several seconds initializing the sandbox and fonts.
   // Keep ordinary commands bounded separately from this initial handshake.
   await cdp("Browser.getVersion", {}, undefined, 30000);
+  await browserExtensions.restore();
   await cdp("Target.setDiscoverTargets", { discover: true });
   const { targetInfos } = await cdp("Target.getTargets");
   for (const t of targetInfos) {
@@ -1072,7 +1120,16 @@ server.listen(18500, "127.0.0.1");
         [...targets.keys()][0],
     );
   await setSplit({}).catch(() => {});
-  await browserExtensions.restore();
+  const restoredActiveId = activeId;
+  for (const tab of targets.values()) {
+    if (!tab.url.startsWith("chrome-extension://")) continue;
+    const extension = browserExtensions.records.get(new URL(tab.url).hostname);
+    if (!extension?.enabled || extension.error) continue;
+    await visibility.activate(tab.targetId);
+    const { frameTree } = await cdp("Page.getFrameTree", {}, await session(tab.targetId));
+    if (frameTree.frame.unreachableUrl) await navigatePage(tab.targetId, tab.url);
+  }
+  if (restoredActiveId && targets.has(restoredActiveId)) await visibility.activate(restoredActiveId);
   for (const tab of targets.values()) if (isNativeNewTab(tab.url)) await restoreHomepage(tab.targetId);
   if (freshProfile && activeId && targets.get(activeId)?.url === "about:blank")
     await cdp("Page.navigate", { url: homeURL }, await session(activeId));

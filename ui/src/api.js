@@ -153,9 +153,15 @@ export const writeClipboard = (text) =>
 export function normalizeURL(text) {
   const value = text.trim();
   if (!value || value === "about:blank") return "about:blank";
+  if (/^chrome-extension:/i.test(value)) {
+    const url = new URL(value);
+    if (url.protocol !== "chrome-extension:" || !/^[a-p]{32}$/.test(url.hostname) || url.username || url.password || url.port)
+      throw new Error("扩展地址无效");
+    return url.href;
+  }
   if (/^https?:\/\//i.test(value)) return new URL(value).href;
   if (/^[a-z][a-z\d+.-]*:/i.test(value) && !/^localhost:\d+/i.test(value))
-    throw new Error("地址仅支持 http 或 https");
+    throw new Error("地址仅支持 HTTP、HTTPS 或浏览器扩展页面");
   if (
     !/\s/.test(value) &&
     (value.includes(".") || /^localhost(?::\d+)?(?:\/|$)/i.test(value))

@@ -21,7 +21,7 @@ import { sendFiles, shellFilePaths } from "./file-transfer";
 import { installRemoteInput } from "./remote-input";
 import { useWindowVisibility } from "./window-visibility";
 import { displayGeometry, displaySizeSync, watchPixelRatio } from "./remote-display.mjs";
-import { installLocalCursorFallback } from "./remote-cursor.mjs";
+import { installLocalCursorFallback, scaleRemoteCursor } from "./remote-cursor.mjs";
 import { guestKeys } from "./guest-keys.mjs";
 import { RefreshCw, Clipboard, ArrowUpRight } from "lucide-react";
 import { SessionAccount } from "./session-account";
@@ -33,6 +33,7 @@ export const RemoteView = forwardRef(function RemoteView(
   { visible, focused = true, keyboard, guestPlatform = "linux", systemClipboard = true, tabId, copyScope = tabId, onStatus, onFallback, desktop = false, zoom = 1 },
   ref,
 ) {
+  const { variant } = useAppearance();
   const windowVisible = useWindowVisibility();
   const screenVisible = visible && windowVisible;
   const box = useRef(),
@@ -45,6 +46,14 @@ export const RemoteView = forwardRef(function RemoteView(
   const [connection, setConnection] = useState("connecting"),
     [attempt, setAttempt] = useState(0),
     [sizeError, setSizeError] = useState(false);
+  useEffect(() => {
+    if (desktop || connection !== "connected" || !screenVisible) return;
+    let disposed = false;
+    api("/browser/settings", { mode: "color-scheme", text: variant }).catch(error => {
+      if (!disposed) current.current.onStatus("浏览器配色同步失败：" + error.message);
+    });
+    return () => { disposed = true; };
+  }, [variant, connection, desktop, screenVisible]);
   useEffect(() => { displayResize.current?.update(); }, [zoom]);
   useEffect(() => { input.current?.cancelCopy(); }, [copyScope]);
   useImperativeHandle(ref, () => ({
@@ -67,6 +76,7 @@ export const RemoteView = forwardRef(function RemoteView(
     let disposed = false,
       client,
       resizeObserver,
+      cursorObserver,
       unwatchDensity,
       sizeSync,
       keys,
@@ -109,6 +119,9 @@ export const RemoteView = forwardRef(function RemoteView(
         }
         installLocalCursorFallback(client._cursor,
           !desktop && ["darwin", "macos"].includes(guestPlatform));
+        const refreshCursor = scaleRemoteCursor(client._cursor, () => container.querySelector("canvas"));
+        cursorObserver = new MutationObserver(refreshCursor);
+        cursorObserver.observe(client._canvas, { attributes: true, attributeFilter: ["width", "height"] });
         client.scaleViewport = true;
         client.resizeSession = false;
         client.background = "#ffffff";
@@ -131,6 +144,7 @@ export const RemoteView = forwardRef(function RemoteView(
           );
           const resize = () => {
             if (disposed) return;
+            refreshCursor();
             sizeSync.update(displayGeometry(container.getBoundingClientRect(), {
               desktop, zoom: current.current.zoom, density: display_scale,
               pixelRatio: followScreen ? window.devicePixelRatio : undefined,
@@ -242,6 +256,7 @@ export const RemoteView = forwardRef(function RemoteView(
           input.current = null;
           sizeSync?.dispose();
           resizeObserver?.disconnect();
+          cursorObserver?.disconnect();
           unwatchDensity?.();
           displayResize.current = null;
           retry();
@@ -259,6 +274,7 @@ export const RemoteView = forwardRef(function RemoteView(
       displayResize.current = null;
       clearTimeout(reconnectTimer);
       resizeObserver?.disconnect();
+      cursorObserver?.disconnect();
       unwatchDensity?.();
       input.current?.dispose();
       input.current = null;

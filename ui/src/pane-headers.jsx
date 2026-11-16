@@ -6,6 +6,7 @@ import { WorkspaceTabs } from "./workspace-tabs";
 import { BrowserFavorites } from "./browser-favorites";
 import { BrowserDownloads } from "./browser-downloads";
 import { BrowserCookies } from "./browser-cookies";
+import { PinnedBrowserExtensions } from "./browser-extensions";
 import { tabName } from "./workspace-state.mjs";
 import { shortcut } from "./platform.mjs";
 import logo from "./logo.png";
@@ -82,7 +83,7 @@ export function BrowserTabRail({ tabs, metadata, active, ready, busy, splitDrag,
 
 export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready, busy, focused, compact, triggerRef, vertical,
   sidebarButton, exitButton, splitDrag, onSelect, onClose, onRename, onPin, onReorder, onNew,
-  location, menu, back, forward, action, onNavigate, onOpen, onNewPrivate, onNewRegular, onCloseBrowser, onSettings, onReload, downloads, onStatus, onEditor, onRecover, recoveringEditor }) {
+  location, menu, back, forward, action, onNavigate, onOpen, onExtensionOpen, onNewPrivate, onNewRegular, onCloseBrowser, onSettings, onReload, downloads, onStatus, onEditor, onRecover, recoveringEditor }) {
   const [address, setAddress] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
   const [cookiesOpen, setCookiesOpen] = useState(false);
@@ -206,6 +207,7 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
           <ArrowUpRight size={15} />
         </button>
       </form>
+      <PinnedBrowserExtensions ready={ready && !busy} onOpen={onExtensionOpen} onStatus={onStatus} />
       <BrowserFavorites current={tab} shortcuts={focused} ready={ready && !busy} onOpen={onOpen} />
       <BrowserDownloads downloads={downloads} ready={ready && !busy} onStatus={onStatus} />
       <button className="icon-button browser-more-trigger" aria-label="浏览器菜单" title="浏览器菜单"

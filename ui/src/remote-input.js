@@ -118,15 +118,20 @@ export function installRemoteInput(
   };
   const updateNative = (rect) => {
     if (nativeFailed || !window.cageNativeIMEAvailable || !nativeAvailable() || !focused()) return;
+    if (!document.hasFocus() && !nativeOwned) return;
     if (!nativeOwned && composing) return;
     const operation = nativeOwned ? "caret" : "activate";
     if (!nativeOwned) { nativeOwner = crypto.randomUUID(); nativeTarget = getTargetId(); nativeOwned = true; }
     const owner = nativeOwner;
     void native("remoteInput", { operation, owner, ...rect }).then((accepted) => {
       if (owner !== nativeOwner) return;
-      if (!accepted || disposed) {
+      if (accepted?.accepted === true && accepted.active === false) {
         deactivateNative();
-        nativeFailed = !accepted;
+        return;
+      }
+      if (!accepted || accepted.accepted === false || disposed) {
+        deactivateNative();
+        nativeFailed = !accepted || accepted.accepted === false;
       }
     }).catch(() => { if (owner === nativeOwner) { deactivateNative(); nativeFailed = true; } });
   };

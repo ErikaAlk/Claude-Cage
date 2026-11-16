@@ -1,5 +1,13 @@
 using Cage.Windows;
 
+#if WINDOWS
+if (args is ["native-input"])
+{
+    NativeInputTests.Run();
+    return;
+}
+#endif
+
 if (args is ["update-working-directory"])
 {
     await UpdateWorkingDirectoryTests.Run();

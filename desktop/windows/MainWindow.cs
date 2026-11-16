@@ -48,7 +48,7 @@ internal sealed class MainWindow : Form
         trayMenu.Items.Add("退出 Cage…", null, (_, _) => RequestQuit());
         trayMenu.Opening += (_, _) => (chrome ?? new WindowChrome(BackColor, ForeColor, false)).ApplyMenu(trayMenu);
         tray = new NotifyIcon { Icon = Icon, Text = "Cage", Visible = true, ContextMenuStrip = trayMenu };
-        tray.DoubleClick += (_, _) => RestoreWindow();
+        tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) RestoreWindow(); };
         updater = new AppUpdater(PublishUpdate, () => { allowQuit = true; Close(); }, () => _ = Bootstrap());
         Shown += async (_, _) => {
             if (Program.SmokeOutput != null) _ = SmokeDeadline();
@@ -361,7 +361,9 @@ internal sealed class MainWindow : Form
                 case "remoteInput":
                     var accepted = nativeInput.ProcessRequest(request, web, web.ZoomFactor, out var returnedFocus);
                     result = request.TryGetProperty("returnFocus", out var restore) && restore.ValueKind == JsonValueKind.True
-                        ? new { returnedFocus = accepted && returnedFocus } : accepted;
+                        ? new { returnedFocus = accepted && returnedFocus }
+                        : request.Text("operation") is "activate" or "caret"
+                            ? new { accepted, active = accepted && nativeInput.Focused } : (object)accepted;
                     break;
                 case "exportDiagnostics":
                     using (var picker = new SaveFileDialog { Title = "导出诊断包", Filter = "诊断包 (*.zip)|*.zip", FileName = "cage-diagnostics.zip", DefaultExt = "zip", AddExtension = true })
