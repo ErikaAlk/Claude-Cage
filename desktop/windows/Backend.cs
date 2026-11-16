@@ -48,7 +48,10 @@ internal static class Backend
         var start = new ProcessStartInfo(executable) {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
             RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8,
-            WorkingDirectory = AppContext.BaseDirectory,
+            // 更新进程必须离开待替换目录，否则 Windows 会阻止安装和恢复时移动目录。
+            WorkingDirectory = arguments is ["--install-update"]
+                ? Path.GetDirectoryName(Path.GetFullPath(executable))!
+                : AppContext.BaseDirectory,
         };
         // Helpers execute outside the installed directory. Keep an explicitly
         // selected relative profile bound to the same absolute file.

@@ -6,12 +6,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,7 +84,10 @@ func (s *Server) clipboardCommand(ctx context.Context, operation string, selecti
 		}
 		return cmd, "guest", nil
 	}
-	command := "exec sudo -n /usr/bin/python3 -c " + shellescape.Quote(cage.SharedClipboardHelper)
+	// 脚本通过标准输入传输，避免超过 Windows 命令行长度限制。
+	// 精确读取脚本字节数，保留后续剪贴板消息和文件数据。
+	loader := fmt.Sprintf("import os\ns=b''\nwhile len(s)<%d:\n c=os.read(0,%d-len(s))\n if not c: raise EOFError('Clipboard helper truncated')\n s+=c\nexec(compile(s, 'cage-shared-clipboard', 'exec'))", len(cage.SharedClipboardHelper), len(cage.SharedClipboardHelper))
+	command := "exec sudo -n /usr/bin/python3 -c " + shellescape.Quote(loader)
 	switch operation {
 	case "stream":
 	case "import":
@@ -99,9 +104,10 @@ func (s *Server) clipboardCommand(ctx context.Context, operation string, selecti
 		return nil, "", errors.New("剪贴板操作无效")
 	}
 	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
+	cmd.Stdin = strings.NewReader(cage.SharedClipboardHelper)
 	if operation == "export" {
 		data, _ := json.Marshal(selection.Paths)
-		cmd.Stdin = bytes.NewReader(data)
+		cmd.Stdin = io.MultiReader(cmd.Stdin, bytes.NewReader(data))
 	}
 	return cmd, "cage", nil
 }
@@ -233,13 +239,13 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { cancel(); s.mu.Lock(); s.clipboardCancel = nil; s.clipboardRelease = nil; s.mu.Unlock() }()
-	// Supply the current helper in stdin so an existing VM can use this fix
-	// without restarting the browser, Desktop, or rebuilding personal data.
 	cmd, source, err := s.clipboardCommand(ctx, "stream", clipboardFileSelection{})
 	if err != nil {
 		http.Error(w, "剪贴板客机配置无效", 502)
 		return
 	}
+	bootstrap := cmd.Stdin
+	cmd.Stdin = nil
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		http.Error(w, "剪贴板连接失败", 502)
@@ -258,6 +264,12 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { cancel(); in.Close(); out.Close(); _ = cmd.Wait() }()
+	if bootstrap != nil {
+		if _, err := io.Copy(in, bootstrap); err != nil {
+			http.Error(w, "剪贴板连接初始化失败", http.StatusBadGateway)
+			return
+		}
+	}
 	ws, err := s.upgrade(w, r)
 	if err != nil {
 		return
@@ -412,7 +424,12 @@ func (s *Server) clipboardArchive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "传递剪贴板文件失败", 502)
 		return
 	}
-	cmd.Stdin = http.MaxBytesReader(w, r.Body, 201<<30)
+	archive := http.MaxBytesReader(w, r.Body, 201<<30)
+	if cmd.Stdin == nil {
+		cmd.Stdin = archive
+	} else {
+		cmd.Stdin = io.MultiReader(cmd.Stdin, archive)
+	}
 	out, err := cmd.StdoutPipe()
 	if err != nil || cmd.Start() != nil {
 		http.Error(w, "传递剪贴板文件失败", 502)

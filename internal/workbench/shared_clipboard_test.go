@@ -3,8 +3,11 @@ package workbench
 import (
 	"archive/tar"
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,7 +180,7 @@ func TestSharedClipboardRequiresSessionAndUnlockedAccount(t *testing.T) {
 	}
 }
 
-// Opt-in integration: uses disposable real X11 displays in the supplied QA VM.
+// 显式启用的集成验证会修改指定测试客机中的剪贴板内容。
 func TestSharedClipboardGuestWebSocketAndFileStream(t *testing.T) {
 	config := os.Getenv("CAGE_CLIPBOARD_QA_SSH_CONFIG")
 	if config == "" {
@@ -225,6 +228,56 @@ func TestSharedClipboardGuestWebSocketAndFileStream(t *testing.T) {
 		}
 		if event["ack"] == float64(1) {
 			break
+		}
+	}
+	image, err := os.ReadFile(filepath.Join("..", "..", "logo.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteJSON(map[string]any{"png": base64.StdEncoding.EncodeToString(image), "serial": 3}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		var event map[string]any
+		if err := ws.ReadJSON(&event); err != nil {
+			t.Fatal(err)
+		}
+		if event["ack"] == float64(3) {
+			break
+		}
+	}
+	imageContext, cancelImage := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelImage()
+	imageReader, err := os.ReadFile(filepath.Join("..", "..", "scripts", "read-guest-clipboard-image.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageCommand := s.sshCommand(imageContext, "-T", s.sshTarget(), "--", "exec env NO_AT_BRIDGE=1 DISPLAY=:78 XAUTHORITY=/run/cage-desktop/Xauthority /usr/bin/python3 -")
+	imageCommand.Stdin = bytes.NewReader(imageReader)
+	var imageErrors bytes.Buffer
+	imageCommand.Stderr = &imageErrors
+	actualImage, err := imageCommand.Output()
+	if err != nil {
+		t.Fatalf("guest PNG clipboard read failed: %v; %s", err, imageErrors.String())
+	}
+	expectedPixels, err := png.Decode(bytes.NewReader(image))
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualPixels, err := png.Decode(bytes.NewReader(actualImage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actualPixels.Bounds() != expectedPixels.Bounds() {
+		t.Fatal("guest PNG clipboard changed image dimensions")
+	}
+	for y := expectedPixels.Bounds().Min.Y; y < expectedPixels.Bounds().Max.Y; y++ {
+		for x := expectedPixels.Bounds().Min.X; x < expectedPixels.Bounds().Max.X; x++ {
+			r, g, b, a := expectedPixels.At(x, y).RGBA()
+			ar, ag, ab, aa := actualPixels.At(x, y).RGBA()
+			if r != ar || g != ag || b != ab || a != aa {
+				t.Fatalf("guest PNG clipboard changed pixel at %d,%d", x, y)
+			}
 		}
 	}
 	root := t.TempDir()

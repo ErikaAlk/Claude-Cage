@@ -1,5 +1,21 @@
 using Cage.Windows;
 
+if (args is ["update-working-directory"])
+{
+    await UpdateWorkingDirectoryTests.Run();
+    return;
+}
+if (args is ["update-helper-probe", var helperPath])
+{
+    await UpdateWorkingDirectoryTests.LaunchHelper(helperPath);
+    return;
+}
+if (args is ["--install-update"])
+{
+    await UpdateWorkingDirectoryTests.HoldHelper();
+    return;
+}
+
 if (args is ["smoke-wait", var smokeRelease])
 {
     using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));

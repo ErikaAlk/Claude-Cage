@@ -142,7 +142,7 @@ func (s *Server) accountAction(w http.ResponseWriter, r *http.Request) {
 	case "lock":
 		err = s.account.lockAccess(false)
 	case "suspend":
-		s.account.lock()
+		s.account.suspend()
 	case "device-enroll":
 		var credential deviceCredential
 		credential, err = s.account.enrollDevice(input.Kind)
