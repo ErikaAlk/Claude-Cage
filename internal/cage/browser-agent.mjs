@@ -79,9 +79,8 @@ const flags = [
   `--load-extension=${[splitDirectory, ...browserExtensions.launchPaths()].join(',')}`,
   "--user-data-dir=/home/cage-browser/profile",
   "--remote-debugging-pipe",
-  // Kiosk mode blocks Chromium's DevTools UI, including F12. Ordinary
-  // fullscreen keeps the guest browser chrome hidden while allowing inspection.
-  "--start-fullscreen",
+  // 使用 kiosk 全屏隐藏 Chromium 的退出提示和顶部退出按钮。
+  "--kiosk",
   "--no-first-run",
   "--restore-last-session",
   "--no-default-browser-check",
