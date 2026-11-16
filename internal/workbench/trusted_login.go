@@ -203,6 +203,7 @@ func (a *localAccount) trustedLogin(action, password, devices string) error {
 		}
 		previous := a.record.TrustedUnlock
 		a.record = &record
+		a.trustedSession = false
 		if previous != nil {
 			_ = os.Remove(filepath.Join(devices, previous.ID+".json"))
 		}
@@ -260,7 +261,7 @@ func (a *localAccount) trustedLogin(action, password, devices string) error {
 			return errors.New("信任凭据与工作区不匹配，请恢复备份")
 		}
 		a.setKey(key)
-		a.trustedSession = true
+		a.trustedSession = a.record.TrustedDevice != ""
 	case "protect":
 		if a.record == nil || a.record.TrustedDevice == "" || len(a.key) != 32 {
 			return errors.New("请先在受信任的本机进入工作区")

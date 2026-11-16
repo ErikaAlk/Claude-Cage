@@ -20,6 +20,7 @@ type terminalPTY interface {
 
 type terminalSession struct {
 	mu                    sync.Mutex
+	resizeMu              sync.Mutex
 	id, title             string
 	sharedID              string
 	connectionID          string
@@ -40,6 +41,8 @@ type terminalSession struct {
 	stopping              chan struct{}
 	closeOnce             sync.Once
 	cliStartupDone        chan struct{}
+	cliScreen             *cliStartupScreen
+	columns, rows         int
 }
 
 func (t *terminalSession) ownsConversation() bool {
@@ -49,7 +52,7 @@ func (t *terminalSession) ownsConversation() bool {
 }
 
 func newTerminalSession(file terminalPTY) *terminalSession {
-	return &terminalSession{file: file, clients: map[chan []byte]bool{}, done: make(chan struct{}), inputs: make(chan string, 8), stopping: make(chan struct{})}
+	return &terminalSession{file: file, clients: map[chan []byte]bool{}, done: make(chan struct{}), inputs: make(chan string, 8), stopping: make(chan struct{}), columns: 100, rows: 30}
 }
 
 func (t *terminalSession) summary() map[string]any {
@@ -123,6 +126,13 @@ func (t *terminalSession) enqueueInput(ctx context.Context, input string) error 
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.enqueueInputLocked(ctx, input)
+}
+
+func (t *terminalSession) enqueueInputLocked(ctx context.Context, input string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if t.closed {
 		return os.ErrClosed
 	}
@@ -132,6 +142,21 @@ func (t *terminalSession) enqueueInput(ctx context.Context, input string) error 
 	default:
 		return errTerminalInputFull
 	}
+}
+
+func (t *terminalSession) resize(columns, rows uint16) error {
+	t.resizeMu.Lock()
+	defer t.resizeMu.Unlock()
+	if err := t.file.Resize(columns, rows); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.columns, t.rows = int(columns), int(rows)
+	if t.cliScreen != nil {
+		t.cliScreen.emulator.Resize(t.columns, t.rows)
+	}
+	return nil
 }
 
 func (t *terminalSession) writeInput() {
@@ -216,6 +241,9 @@ func (t *terminalSession) read() {
 		if n > 0 {
 			chunk := append([]byte(nil), buffer[:n]...)
 			t.mu.Lock()
+			if t.cliScreen != nil {
+				t.cliScreen.write(chunk)
+			}
 			if t.kind != "claude-login" {
 				t.history = append(t.history, chunk...)
 				if len(t.history) > 512<<10 {

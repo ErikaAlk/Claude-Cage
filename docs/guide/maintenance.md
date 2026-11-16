@@ -77,6 +77,8 @@ Windows 自动安装失败时，会先核对原程序是否完整；原程序完
 
 Windows v0.1.7 升级到包含自动更新修复的后续版本时，需要手动安装一次完整安装包：先保存工作、停止环境并退出 Cage，再运行修正版安装器，沿用原安装目录和同一 Windows 用户。安装会保留账户、配置、登录凭据、项目和原有环境磁盘。重新打开后核对账户、项目与环境；此后的版本可继续通过应用内更新。若旧更新已留下待处理的恢复回执，先按下文的恢复说明处理。
 
+本地开发构建 `0.1.8-local.1` 保留登录恢复与 Windows 更新助手修复，继续手动更新。
+
 <figure class="guide-shot">
   <a href="../../www/public/docs/screenshots/windows-native-storage.png" target="_blank" rel="noopener" aria-label="查看原图：Windows 原生应用的版本与环境维护"><img src="../../www/public/docs/screenshots/windows-native-storage.png" alt="Windows 原生应用的版本与环境维护" width="1259" height="759" loading="lazy" decoding="async" /></a>
   <figcaption>Windows 原生应用的版本与环境维护。截图版本：0.1.5-alpha.2（测试构建） · Windows 11 x64 原生应用 · 2026-11-06。<a href="../../www/public/docs/screenshots/windows-native-storage.png" target="_blank" rel="noopener">查看原图（1259 × 759） ↗</a></figcaption>

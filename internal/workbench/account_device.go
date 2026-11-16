@@ -142,11 +142,6 @@ func (a *localAccount) lockAccess(logout bool) error {
 		return errors.New("无法保存账户锁定状态，请重试")
 	}
 	a.record = &record
-	if a.cancel != nil {
-		a.cancel()
-		a.cancel = nil
-	}
-	clear(a.key)
-	a.key = nil
+	a.lockKey()
 	return nil
 }

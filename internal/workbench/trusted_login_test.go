@@ -25,7 +25,10 @@ func TestTrustedLocalLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := bytes.Clone(a.key)
-	a.lock()
+	a.suspend()
+	if a.viewFor(true).Unlocked {
+		t.Fatal("legacy local workspace remained unlocked after suspension")
+	}
 	a, err = loadLocalAccount(profile)
 	if err != nil {
 		t.Fatal(err)
@@ -51,6 +54,13 @@ func TestTrustedLocalLifecycle(t *testing.T) {
 	}
 	if err = a.unlock("first-password"); err != nil || !bytes.Equal(original, a.key) {
 		t.Fatal("password conversion lost workspace", err)
+	}
+	a.suspend()
+	if a.viewFor(false).Unlocked {
+		t.Fatal("desktop suspension retained access without remember me")
+	}
+	if err = a.unlock("first-password"); err != nil {
+		t.Fatal(err)
 	}
 	if err = a.trustedLogin("enable", "first-password", devices); err != nil {
 		t.Fatal(err)
@@ -163,7 +173,10 @@ func TestTrustedPasswordRememberMigrationAndRepair(t *testing.T) {
 			t.Fatal("opt-out left an automatic login path enabled")
 		}
 	}
-	a.lock()
+	a.suspend()
+	if a.viewFor(false).Unlocked {
+		t.Fatal("disabled remember me retained access after suspension")
+	}
 	if err = a.trustedLogin("resume", "", otherDevice); err == nil {
 		t.Fatal("disabled trust reopened the account")
 	}
@@ -277,6 +290,9 @@ func TestTrustedLocalDesktopEntryAndWorkload(t *testing.T) {
 			t.Fatalf("password account %s: %d %s", action, w.Code, w.Body.String())
 		}
 	}
+	if !workload.account.viewFor(false).Unlocked {
+		t.Fatal("password-confirmed remember me did not authorize remote access")
+	}
 	workload.account.lock()
 	workload.account, err = loadLocalAccount(workload.profile)
 	if err != nil {
@@ -284,7 +300,32 @@ func TestTrustedLocalDesktopEntryAndWorkload(t *testing.T) {
 	}
 	body, _ = json.Marshal(trustedLoginRequest{Action: "resume", ConnectionID: d.generation})
 	w = request(gateway, "POST", "/api/client/trusted-login", gateway.origin, string(body), true)
-	if w.Code != http.StatusOK || !workload.account.viewFor(true).Unlocked || workload.account.viewFor(false).Unlocked {
-		t.Fatalf("password account did not resume privately after reload: %d %s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK || !workload.account.viewFor(true).Unlocked || !workload.account.viewFor(false).Unlocked {
+		t.Fatalf("remembered password account did not restore remote access after reload: %d %s", w.Code, w.Body.String())
+	}
+	epoch, unlocked := workload.account.accessFor(false, false)
+	if !unlocked || epoch == nil || epoch.Err() != nil {
+		t.Fatal("remembered login did not restore the remote request lifetime")
+	}
+	if response := request(workload, "GET", "/api/favorites", "", "", true); response.Code != http.StatusOK {
+		t.Fatalf("authenticated remote request remained locked: %d %s", response.Code, response.Body.String())
+	}
+	if response := request(workload, "GET", "/api/favorites", "", "", false); response.Code != http.StatusUnauthorized {
+		t.Fatalf("remembered login bypassed request authentication: %d", response.Code)
+	}
+	if response := request(workload, "POST", "/api/account/suspend", workload.origin, `{}`, true); response.Code != http.StatusOK {
+		t.Fatalf("desktop suspension failed: %d %s", response.Code, response.Body.String())
+	}
+	if epoch.Err() != nil || !workload.account.viewFor(false).Unlocked {
+		t.Fatal("closing the desktop canceled remembered remote access")
+	}
+	if err = workload.account.lockAccess(false); err != nil {
+		t.Fatal(err)
+	}
+	if epoch.Err() == nil || workload.account.viewFor(false).Unlocked {
+		t.Fatal("explicit lock retained remembered remote access")
+	}
+	if err = workload.account.trustedLogin("resume", "", filepath.Join(base, "Cage", "trusted-local")); err == nil {
+		t.Fatal("remembered login bypassed explicit lock")
 	}
 }

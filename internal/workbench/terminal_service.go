@@ -27,6 +27,7 @@ type terminalRequest struct {
 	ClaudeAccountID string `json:"claude_account_id"`
 	sharedID        string
 	requestContext  context.Context
+	creationContext context.Context
 }
 
 // terminalManager owns host PTYs; subscriptions only borrow their output. The
@@ -216,11 +217,56 @@ func (m *terminalManager) close() {
 }
 
 func (s *Server) createTerminal(input terminalRequest) (*terminalSession, error) {
-	if !s.op.TryLock() {
-		return nil, errTerminalBusy
+	ctx := input.requestContext
+	if ctx == nil {
+		ctx = s.lifetimeContext()
+	}
+	return s.createTerminalWithContext(ctx, input)
+}
+
+func (s *Server) createTerminalWithContext(ctx context.Context, input terminalRequest) (*terminalSession, error) {
+	if err := s.lockTerminalOperation(ctx); err != nil {
+		return nil, err
 	}
 	defer s.op.Unlock()
+	input.creationContext = ctx
 	return s.createTerminalLocked(input)
+}
+
+func (s *Server) lockTerminalOperation(ctx context.Context) error {
+	wait, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	stop := context.AfterFunc(s.lifetimeContext(), cancel)
+	defer stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		s.mu.Lock()
+		closing := s.closing
+		s.mu.Unlock()
+		if closing {
+			return errTerminalsClosed
+		}
+		if err := wait.Err(); err != nil {
+			return err
+		}
+		if s.busy() {
+			return errTerminalBusy
+		}
+		if s.op.TryLock() {
+			if err := wait.Err(); err != nil {
+				s.op.Unlock()
+				return err
+			}
+			return nil
+		}
+		// 周期检查持有同一把锁，请求等待检查结束并保留取消能力。
+		select {
+		case <-wait.Done():
+			return wait.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // Caller holds the environment operation lock through PTY publication.
@@ -376,6 +422,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
+	if input.creationContext != nil && input.creationContext.Err() != nil {
+		return nil, input.creationContext.Err()
+	}
 	if input.requestContext != nil {
 		s.account.mu.Lock()
 		if !s.mobileAuthorized(input.requestContext) {

@@ -54,6 +54,9 @@ func (s *Server) createRemoteWindowsTerminal(input terminalRequest) (*terminalSe
 			return nil, errMobileLocked
 		}
 	}
+	if input.creationContext != nil && input.creationContext.Err() != nil {
+		return nil, input.creationContext.Err()
+	}
 	return s.terminals.startSessionWithPTY(cmd, state.Home, "shell", claudeSelection{}, nil,
 		func() (terminalPTY, error) { return startWindowsGuestTerminal(cmd, 100, 30) })
 }

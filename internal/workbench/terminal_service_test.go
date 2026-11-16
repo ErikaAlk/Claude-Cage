@@ -53,6 +53,64 @@ func terminalInputLine(text string) string {
 	return text + "\n"
 }
 
+func TestTerminalAdmissionWaitsForRoutineOperation(t *testing.T) {
+	s := &Server{profile: t.TempDir()}
+	s.op.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.op.Unlock()
+		}
+	}()
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := s.createTerminal(terminalRequest{Kind: "shell"})
+		result <- err
+	}()
+	<-started
+	select {
+	case err := <-result:
+		t.Fatalf("后台检查结束前拒绝了终端请求：%v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	s.op.Unlock()
+	locked = false
+	select {
+	case err := <-result:
+		if !errors.Is(err, errTerminalNotReady) {
+			t.Fatalf("操作锁释放后未检查实际环境状态：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("操作锁释放后终端请求仍未完成")
+	}
+}
+
+func TestTerminalAdmissionCancellationReleasesWaiter(t *testing.T) {
+	s := &Server{profile: t.TempDir()}
+	s.op.Lock()
+	defer s.op.Unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() {
+		_, err := s.createTerminalWithContext(ctx, terminalRequest{Kind: "shell"})
+		result <- err
+	}()
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("等待取消后返回错误不正确：%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("取消请求未终止操作锁等待")
+	}
+	if len(s.terminals.snapshot()) != 0 {
+		t.Fatal("已取消的请求创建了终端")
+	}
+}
+
 func awaitTerminalSignal(t *testing.T, done <-chan struct{}) {
 	t.Helper()
 	select {

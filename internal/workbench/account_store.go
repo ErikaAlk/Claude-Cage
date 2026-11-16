@@ -220,6 +220,23 @@ func (a *localAccount) lock() {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.lockKey()
+}
+
+func (a *localAccount) suspend() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.record != nil && a.record.TrustedUnlock != nil && !a.record.RequireAuthentication {
+		return
+	}
+	a.lockKey()
+}
+
+// 调用方持有 a.mu。
+func (a *localAccount) lockKey() {
 	if a.cancel != nil {
 		a.cancel()
 		a.cancel = nil

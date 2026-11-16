@@ -3,6 +3,7 @@
 node_modules
 dist
 /_output
+/.project/
 # Local scratch checkouts. third_party/ holds compiled dependency source.
 /lima/
 /lima-pr/
@@ -45,7 +46,6 @@ __pycache__/
 /logs/*.log
 
 # Local development material; public docs describe installation and use.
-/AGENTS.md
 /.scratch/
 /.out-of-scope/
 /CONTRIBUTING.md

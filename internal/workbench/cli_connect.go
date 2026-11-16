@@ -2,14 +2,49 @@ package workbench
 
 import (
 	"context"
+	"io"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/charmbracelet/x/vt"
 )
 
 var cliStartupEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-var cliOwnedChannel = regexp.MustCompile(`Channels:server:cage(?:[❯›>]?1\.|Iamusingthisforlocaldevelopment)`)
+var cliOwnedChannel = regexp.MustCompile(`Channels:server:([0-9a-fA-F-]{36})(?:[❯›>]?1\.|Iamusingthisforlocaldevelopment)`)
+
+type cliStartupScreen struct {
+	emulator *vt.Emulator
+	drained  chan struct{}
+}
+
+func newCLIStartupScreen(columns, rows int) *cliStartupScreen {
+	screen := &cliStartupScreen{emulator: vt.NewEmulator(columns, rows), drained: make(chan struct{})}
+	go func() {
+		defer close(screen.drained)
+		if _, err := io.Copy(io.Discard, screen.emulator); err != nil {
+			panic(err)
+		}
+	}()
+	return screen
+}
+
+func (screen *cliStartupScreen) write(data []byte) {
+	if _, err := screen.emulator.Write(data); err != nil {
+		panic(err)
+	}
+}
+
+func (screen *cliStartupScreen) close() {
+	if err := screen.emulator.InputPipe().(io.Closer).Close(); err != nil {
+		panic(err)
+	}
+	<-screen.drained
+	if err := screen.emulator.Close(); err != nil {
+		panic(err)
+	}
+}
 
 func cliStartupText(data []byte) string {
 	return strings.Map(func(r rune) rune {
@@ -23,9 +58,10 @@ func cliStartupText(data []byte) string {
 // Cage already owns this locally generated channel and the user has granted
 // access to this project. Only their two startup dialogs can be completed here.
 // Tool approvals, external MCP servers and login dialogs remain untouched.
-func cliStartupDialog(text, workspace string) string {
-	if strings.Contains(text, "WARNING:Loadingdevelopmentchannels") &&
-		cliOwnedChannel.MatchString(text) &&
+func cliStartupDialog(text, workspace, connection string) string {
+	channel := cliOwnedChannel.FindStringSubmatch(text)
+	if validCLIUUID(connection) && len(channel) == 2 && channel[1] == connection &&
+		strings.Contains(text, "WARNING:Loadingdevelopmentchannels") &&
 		strings.Contains(text, "Iamusingthisforlocaldevelopment") {
 		return "channel"
 	}
@@ -40,22 +76,34 @@ func cliStartupDialog(text, workspace string) string {
 func (s *Server) prepareCLIConnection(terminal *terminalSession, id string) {
 	terminal.mu.Lock()
 	terminal.cliStartupDone = make(chan struct{})
+	screen := newCLIStartupScreen(terminal.columns, terminal.rows)
+	screen.write(terminal.history)
+	terminal.cliScreen = screen
 	terminal.mu.Unlock()
 	s.activities.Add(1)
 	go func() {
 		defer s.activities.Done()
+		defer func() {
+			terminal.mu.Lock()
+			terminal.cliScreen = nil
+			screen.close()
+			terminal.mu.Unlock()
+		}()
 		defer terminal.finishCLIStartup()
 		ctx, cancel := context.WithTimeout(s.lifetimeContext(), 45*time.Second)
 		defer cancel()
 		s.mobileCLI.mu.Lock()
 		record, err := s.mobileCLI.record(s.profile, id)
-		s.mobileCLI.mu.Unlock()
 		if err != nil {
+			s.mobileCLI.mu.Unlock()
 			return
 		}
+		cliID, config, connection, workspace := record.CLIID, record.GuestConfig, record.Connection, record.GuestWorkspace
+		s.mobileCLI.mu.Unlock()
 		ticker := time.NewTicker(200 * time.Millisecond)
 		defer ticker.Stop()
-		seen := map[string]time.Time{}
+		seenDialog := ""
+		var seenAt time.Time
 		completed := map[string]bool{}
 		nextCheck := time.Now()
 		for {
@@ -68,7 +116,7 @@ func (s *Server) prepareCLIConnection(terminal *terminalSession, id string) {
 			}
 			if time.Now().After(nextCheck) {
 				var current terminalConversation
-				if err := s.runCLIChannel(ctx, "view", map[string]string{"cli_id": record.CLIID, "config": record.GuestConfig, "connection": record.Connection}, &current); err != nil {
+				if err := s.runCLIChannel(ctx, "view", map[string]string{"cli_id": cliID, "config": config, "connection": connection}, &current); err != nil {
 					nextCheck = time.Now().Add(time.Second)
 					continue
 				}
@@ -76,7 +124,7 @@ func (s *Server) prepareCLIConnection(terminal *terminalSession, id string) {
 					var response struct {
 						OK bool `json:"ok"`
 					}
-					if err := s.runCLIChannel(ctx, "rpc", map[string]string{"cli_id": record.CLIID, "connection": record.Connection, "action": "resume"}, &response); err != nil || !response.OK {
+					if err := s.runCLIChannel(ctx, "rpc", map[string]string{"cli_id": cliID, "connection": connection, "action": "resume"}, &response); err != nil || !response.OK {
 						continue
 					}
 					return
@@ -87,25 +135,32 @@ func (s *Server) prepareCLIConnection(terminal *terminalSession, id string) {
 				nextCheck = time.Now().Add(time.Second)
 			}
 			terminal.mu.Lock()
-			text := cliStartupText(terminal.history)
+			text := cliStartupText([]byte(screen.emulator.String()))
 			terminal.mu.Unlock()
-			dialog := cliStartupDialog(text, record.GuestWorkspace)
+			dialog := cliStartupDialog(text, workspace, connection)
+			if dialog != seenDialog {
+				seenDialog, seenAt = dialog, time.Now()
+				continue
+			}
 			if dialog == "" || completed[dialog] {
 				continue
 			}
-			if seen[dialog].IsZero() {
-				seen[dialog] = time.Now()
-				continue
-			}
 			// The CLI ignores keys during a dialog's opening guard interval.
-			if time.Since(seen[dialog]) < time.Second {
+			if time.Since(seenAt) < time.Second {
 				continue
 			}
 			input := "\r"
 			if dialog == "project" && strings.Contains(text, "❯No,exit") {
 				input = "\x1b[B\r"
 			}
-			if err := terminal.enqueueInput(ctx, input); err != nil {
+			terminal.mu.Lock()
+			if cliStartupDialog(cliStartupText([]byte(screen.emulator.String())), workspace, connection) != dialog {
+				terminal.mu.Unlock()
+				continue
+			}
+			err := terminal.enqueueInputLocked(ctx, input)
+			terminal.mu.Unlock()
+			if err != nil {
 				return
 			}
 			completed[dialog] = true
