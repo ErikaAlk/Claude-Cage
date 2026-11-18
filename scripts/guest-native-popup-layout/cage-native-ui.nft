@@ -1,0 +1,7 @@
+destroy table inet cage_native_ui
+table inet cage_native_ui {
+  chain output {
+    type filter hook output priority -10; policy accept;
+    ip daddr 127.0.0.1 tcp dport 19223 meta skuid != "cage-native-ui" reject
+  }
+}

@@ -3,7 +3,7 @@ import { createTailnetClient } from "./tailnet-client.mjs";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 const runFile = promisify(execFile);
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, constants } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, renameSync, mkdirSync, existsSync, rmSync, constants } from "node:fs";
 import { open } from "node:fs/promises";
 import http from "node:http";
 import { auditBrowser } from "./browser-audit.mjs";
@@ -66,6 +66,34 @@ const publicURL = tab => isSettingsTab(tab) ? "cage://settings" + new URL(tab.ur
 let splitView = null, splitSession, splitTarget, splitOpening, resizeTimer;
 const favicons = new Map(), faviconRequests = new Map(), documents = new Map();
 const tabContainerPages = new Map();
+const extensionPageKinds = new Map();
+
+async function observeTargetInfo(target) {
+  if (!isBrowserTab(target)) {
+    updateTargetInfo(target);
+    return;
+  }
+  const previous = extensionPageKinds.get(target.targetId);
+  if (previous?.regular === true || previous?.pending) {
+    previous.target = target;
+    if (previous.regular === true) updateTargetInfo(target);
+    return previous.pending;
+  }
+  const entry = { target };
+  extensionPageKinds.set(target.targetId, entry);
+  entry.pending = (async () => {
+    const result = await cdp('Runtime.evaluate', {
+      expression: `chrome.debugger.getTargets().then(targets => targets.some(target => target.id === ${JSON.stringify(target.targetId)} && Number.isInteger(target.tabId) && target.tabId >= 0))`,
+      awaitPromise: true, returnByValue: true,
+    }, await splitController());
+    if (result.exceptionDetails || typeof result.result?.value !== 'boolean') throw new Error('扩展页面类型识别失败');
+    if (extensionPageKinds.get(target.targetId) !== entry) return;
+    entry.regular = result.result.value;
+    if (entry.regular) updateTargetInfo(entry.target);
+    entry.pending = null;
+  })();
+  return entry.pending;
+}
 
 function isBrowserTab(target) {
   return target.type === "page" && target.url !== splitURL &&
@@ -79,6 +107,7 @@ const flags = [
   `--load-extension=${[splitDirectory, ...browserExtensions.launchPaths()].join(',')}`,
   "--user-data-dir=/home/cage-browser/profile",
   "--remote-debugging-pipe",
+  ...(process.env.CAGE_NATIVE_POPUP_LAYOUT === '1' ? ['--enable-ui-devtools=19223'] : []),
   // 使用 kiosk 全屏隐藏 Chromium 的退出提示和顶部退出按钮。
   "--kiosk",
   "--no-first-run",
@@ -259,7 +288,7 @@ async function auditCDP(method, params, ...args) {
   } finally {
     auditCreations.delete(creating);
     if (!auditCreations.size) {
-      for (const t of deferredTargetInfo.values()) updateTargetInfo(t);
+      for (const t of deferredTargetInfo.values()) void observeTargetInfo(t);
       deferredTargetInfo.clear();
     }
     complete();
@@ -314,9 +343,10 @@ chrome.stdio[4].on("data", (chunk) => {
     ) {
       const t = p.targetInfo;
       if (auditCreations.size) deferredTargetInfo.set(t.targetId, t);
-      else updateTargetInfo(t);
+      else void observeTargetInfo(t);
     }
     if (event.method === "Target.targetDestroyed") {
+      extensionPageKinds.delete(p.targetId);
       auditExclusions.delete(p.targetId);
       deferredTargetInfo.delete(p.targetId);
       inspectors.delete(p.targetId);
@@ -643,9 +673,7 @@ async function restartEditor(workspace) {
 async function tabState() {
   await Promise.allSettled([...auditCreations]);
   const { targetInfos } = await cdp("Target.getTargets");
-  for (const tab of targetInfos)
-    if (isBrowserTab(tab))
-      targets.set(tab.targetId, privateBrowser.tab(loginBrowser.tab(tab, targets.get(tab.targetId))));
+  for (const tab of targetInfos) await observeTargetInfo(tab);
   await refreshNavigation();
   return publicState();
 }
@@ -977,6 +1005,13 @@ const server = http.createServer(async (req, res) => {
             if (containerId) break;
           }
           if (!containerId) throw new Error('未找到扩展操作对应的浏览器标签');
+          if (process.env.CAGE_NATIVE_POPUP_LAYOUT === '1') {
+            const right = input.x === undefined ? 1 : input.x / 1000000;
+            if (!Number.isFinite(right) || right < 0 || right > 1) throw new Error('扩展按钮位置无效');
+            writeFileSync('/run/cage-native-ui/extension-anchor.next.json', JSON.stringify({ right }), { mode: 0o660 });
+            chmodSync('/run/cage-native-ui/extension-anchor.next.json', 0o660);
+            renameSync('/run/cage-native-ui/extension-anchor.next.json', '/run/cage-native-ui/extension-anchor.json');
+          }
           await cdp("Extensions.triggerAction", { id: input.id, targetId: containerId });
           return { ok: true };
         }
@@ -1105,7 +1140,7 @@ server.listen(18500, "127.0.0.1");
   const { targetInfos } = await cdp("Target.getTargets");
   for (const t of targetInfos) {
     if (t.url.startsWith("devtools://")) inspectors.add(t.targetId);
-    if (isBrowserTab(t)) targets.set(t.targetId, t);
+    await observeTargetInfo(t);
   }
   await cdp("Browser.setDownloadBehavior", {
     behavior: "allowAndName",

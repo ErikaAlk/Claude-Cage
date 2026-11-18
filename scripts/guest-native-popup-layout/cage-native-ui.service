@@ -1,0 +1,18 @@
+[Unit]
+Description=Cage native extension popup layout
+Requires=cage-browser.service cage-native-ui-firewall.service
+After=cage-browser.service cage-native-ui-firewall.service
+PartOf=cage-browser.service
+[Service]
+User=cage-native-ui
+Group=cage-browser
+RuntimeDirectory=cage-native-ui
+RuntimeDirectoryMode=0770
+ExecStartPre=/usr/bin/install -m 0660 /etc/claude-cage/extension-anchor.json /run/cage-native-ui/extension-anchor.json
+ExecStart=/usr/bin/node /usr/local/lib/browser-popup-layout.mjs
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+MemoryMax=256M

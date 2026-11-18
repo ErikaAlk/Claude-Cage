@@ -997,7 +997,13 @@ func (a *HostAgent) processGuestAgentEvents(ctx context.Context, client *guestag
 		if useSSHFwd {
 			a.portForwarder.OnEvent(ctx, ev)
 		} else {
-			dialContext := portfwd.DialContextToGRPCTunnel(client)
+			dialContext := func(ctx context.Context, network, address string) (net.Conn, error) {
+				current := a.getClient()
+				if current == nil {
+					return nil, fmt.Errorf("guest agent client is unavailable")
+				}
+				return portfwd.DialContextToGRPCTunnel(current)(ctx, network, address)
+			}
 			a.grpcPortForwarder.OnEvent(ctx, dialContext, ev)
 		}
 		return nil
