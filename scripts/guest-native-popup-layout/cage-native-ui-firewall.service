@@ -1,0 +1,7 @@
+[Unit]
+Description=Cage native popup control isolation
+Before=cage-browser.service
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/claude-cage/cage-native-ui.nft
+RemainAfterExit=yes
