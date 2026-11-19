@@ -78,6 +78,7 @@ func stopWindowsCore(profile string) error {
 	}
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, record.PID)
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		_ = diagnostics.New(profile).Record("warn", "proxy", fmt.Sprintf("记录中的代理进程已经退出 pid=%d", record.PID))
 		return removeStaleCore(profile, path)
 	}
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) && !recordedCoreRunning(record) {
@@ -103,6 +104,7 @@ func stopWindowsCore(profile string) error {
 		return err
 	}
 	if code == 259 {
+		_ = diagnostics.New(profile).Record("info", "proxy", fmt.Sprintf("控制服务请求停止代理 pid=%d", record.PID))
 		if err := windows.TerminateProcess(handle, 0); err != nil {
 			return err
 		}
@@ -225,12 +227,16 @@ func startWindowsCore(ctx context.Context, profile string, s Store) error {
 		_ = cmd.Wait()
 		return err
 	}
+	started := time.Now()
+	_ = diagnostics.New(profile).Record("info", "proxy", fmt.Sprintf("已启动代理 pid=%d", cmd.Process.Pid))
 	go func() {
 		err := cmd.Wait()
 		_ = log.Close()
+		level := "info"
 		if err != nil {
-			_ = diagnostics.New(profile).Record("error", "proxy", "core exited: "+err.Error())
+			level = "error"
 		}
+		_ = diagnostics.New(profile).Record(level, "proxy", fmt.Sprintf("代理进程退出 pid=%d exit_code=%d uptime_ms=%d wait_error=%v", cmd.Process.Pid, cmd.ProcessState.ExitCode(), time.Since(started).Milliseconds(), err))
 	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()

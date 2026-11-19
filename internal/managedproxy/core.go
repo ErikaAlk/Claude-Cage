@@ -149,6 +149,18 @@ func Running(ctx context.Context, profile string, s Store) bool {
 	return checkRunning(ctx, profile, s) == nil
 }
 
+// EnsureRunning restores the applied core before collecting gate evidence.
+func EnsureRunning(ctx context.Context, profile string, s Store) error {
+	if err := checkRunning(ctx, profile, s); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		_ = diagnostics.New(profile).Record("warn", "proxy", "联网检查发现代理未就绪，启动当前配置："+err.Error())
+		return Start(ctx, profile, s)
+	}
+	return nil
+}
+
 func checkRunning(ctx context.Context, profile string, s Store) error {
 	var cfg struct {
 		Port         int    `json:"mixed-port"`

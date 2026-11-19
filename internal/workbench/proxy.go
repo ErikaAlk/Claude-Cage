@@ -517,7 +517,27 @@ func (s *Server) checkProxyHealth() {
 	if err == nil && cfg.RequireManagedProxy(s.profile) == nil && managedproxy.Running(ctx, s.profile, p) {
 		return
 	}
-	_ = s.closeProxyGate("内置代理已中断或节点状态变化，请重试应用节点")
+	const interrupted = "内置代理已中断"
+	client, gateErr := s.gateClient()
+	if gateErr != nil {
+		_ = s.closeProxyGate(interrupted)
+		return
+	}
+	state, gateErr := client.Status(s.lifetimeContext())
+	if gateErr != nil || state.Mode != cage.GateClosed {
+		if err := s.closeProxyGate(interrupted); err != nil {
+			return
+		}
+		state, gateErr = client.Status(s.lifetimeContext())
+	}
+	if gateErr == nil && state.Reason == interrupted && cfg.RequireManagedProxy(s.profile) == nil {
+		s.mu.Lock()
+		pending := s.recovery.RunID != ""
+		s.mu.Unlock()
+		if !pending {
+			s.scheduleNetworkRecovery(state)
+		}
+	}
 	s.mu.Lock()
 	s.safety.monitorError = "内置代理未就绪；外网保持关闭"
 	s.mu.Unlock()
