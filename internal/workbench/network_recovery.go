@@ -8,6 +8,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
+	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 )
 
@@ -54,9 +55,15 @@ func (s *Server) networkRecoveryMessageLocked(now time.Time) string {
 }
 
 func (s *Server) scheduleNetworkRecovery(state cage.GateStatus) {
+	if state.Report != nil {
+		s.scheduleFullRecheck(state)
+	}
+}
+
+func (s *Server) scheduleFullRecheck(state cage.GateStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.networkPaused || s.closing || state.Mode != cage.GateClosed || state.Report == nil {
+	if s.networkPaused || s.closing || state.Mode != cage.GateClosed || state.RunID == "" || state.Configuration == "" {
 		return
 	}
 	s.recovery = networkRecovery{RunID: state.RunID, Configuration: state.Configuration, Epoch: state.Epoch, PauseVersion: s.safety.pauseVersion, Next: time.Now().Add(15 * time.Second)}
@@ -110,7 +117,38 @@ func (s *Server) recoverNetwork() {
 		}
 		return
 	}
-	_, _ = s.submitJob("network-recovery", func() error { return s.runNetworkRecovery(r, s.runSafetyCheck) })
+	_, _ = s.submitJob("network-recovery", func() error { return s.runNetworkRecovery(r, s.repairProxyAndCheckNetwork) })
+}
+
+func (s *Server) repairProxyAndCheckNetwork() error {
+	cfg, err := loadConfig(s.configPath)
+	if err != nil {
+		return err
+	}
+	proxy, err := managedproxy.Applied(s.profile, cfg.ProxyURL, cfg.ProxyRevision)
+	if err != nil {
+		return err
+	}
+	ctx := s.operationContext()
+	if managedproxy.Running(ctx, s.profile, proxy) {
+		if _, err := cage.ProbeExitIP(ctx, cfg); err == nil {
+			return s.runSafetyCheck()
+		}
+	}
+	s.mu.Lock()
+	paused := s.networkPaused || s.closing
+	s.mu.Unlock()
+	if paused || ctx.Err() != nil {
+		return context.Canceled
+	}
+	diagnostics.Log("warn", "network", "正在重新启动当前节点的内置代理，随后执行完整联网检查")
+	if err := managedproxy.Stop(s.profile); err != nil {
+		return err
+	}
+	if err := managedproxy.Start(ctx, s.profile, proxy); err != nil {
+		return err
+	}
+	return s.runSafetyCheck()
 }
 
 func (s *Server) runNetworkRecovery(expected networkRecovery, recheck func() error) error {
@@ -139,7 +177,7 @@ func (s *Server) runNetworkRecovery(expected networkRecovery, recheck func() err
 	}
 	s.mu.Lock()
 	valid := !s.closing && s.recovery == expected && recoveryMatches(expected, state, cfg.Fingerprint(), s.networkPaused, s.safety.pauseVersion)
-	if !valid {
+	if !valid && s.recovery == expected {
 		s.recovery = networkRecovery{}
 	}
 	s.mu.Unlock()

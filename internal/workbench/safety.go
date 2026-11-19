@@ -22,6 +22,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/containerenv"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/exitpolicy"
+	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/paths"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 	"go.yaml.in/yaml/v3"
@@ -652,7 +653,8 @@ func (s *Server) runSafetyCheck() (returned error) {
 	if err != nil {
 		return err
 	}
-	if err = cfg.RequireManagedProxy(s.profile); err != nil {
+	proxy, err := managedproxy.Applied(s.profile, cfg.ProxyURL, cfg.ProxyRevision)
+	if err != nil {
 		_ = s.closeProxyGate(err.Error())
 		return err
 	}
@@ -688,6 +690,7 @@ func (s *Server) runSafetyCheck() (returned error) {
 		return err
 	}
 	granted := false
+	retryProxyTransport := false
 	defer func() {
 		s.safetyOp.Lock()
 		defer s.safetyOp.Unlock()
@@ -702,6 +705,9 @@ func (s *Server) runSafetyCheck() (returned error) {
 			closed, e := client.Close(context.Background(), reason)
 			if e == nil {
 				s.publishGate(closed)
+				if retryProxyTransport && s.jobs.snapshot().Kind != "network-recovery" && ctx.Err() == nil {
+					s.scheduleFullRecheck(closed)
+				}
 			}
 		}
 		s.mu.Lock()
@@ -712,6 +718,10 @@ func (s *Server) runSafetyCheck() (returned error) {
 		}
 		s.mu.Unlock()
 	}()
+	if err := managedproxy.EnsureRunning(ctx, s.profile, proxy); err != nil {
+		retryProxyTransport = true
+		return err
+	}
 	if cfg.ExitPolicy.NeedsBinding() {
 		s.setMessage("正在首次绑定此出口节点的 IP 或地区…")
 		loc, err := probeLocation(ctx, cfg)
@@ -964,6 +974,7 @@ func (s *Server) runSafetyCheck() (returned error) {
 		set("proxy_transport", cage.CheckPassed, "终端请求经过 环境网络层的固定检测通道，并由指定代理完成 HTTPS 出口查询；未放开任意网站", "")
 	} else {
 		evidence := fmt.Sprintf("环境未能完成代理出口查询（检测通道 HTTP %d），尚不能确认代理连接可用", network.Egress.Status)
+		retryProxyTransport = networkErr == nil && network.Egress.Status == http.StatusServiceUnavailable
 		if network.Egress.Status == 0 {
 			evidence = "环境没有收到代理出口查询的结果，尚不能确认代理连接可用"
 		}
