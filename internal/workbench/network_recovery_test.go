@@ -204,15 +204,17 @@ func TestNetworkRecoveryAdmissionRequiresObservedPressureToDefer(t *testing.T) {
 		name    string
 		status  cage.ResourceStatus
 		wantJob bool
+		overdue time.Duration
 	}{
-		{"memory target could not be applied", cage.ResourceStatus{ObservedAt: now, Error: "内存目标未能应用，保持当前配置"}, true},
-		{"failed sample retains stale guest pressure", cage.ResourceStatus{ObservedAt: now.Add(-time.Minute), Error: "资源采样暂时不可用，已暂停内存回收", Pressure: true}, true},
-		{"current guest pressure", cage.ResourceStatus{ObservedAt: now, Pressure: true}, false},
-		{"current host pressure", cage.ResourceStatus{HostPressure: true}, false},
+		{"memory target could not be applied", cage.ResourceStatus{ObservedAt: now, Error: "内存目标未能应用，保持当前配置"}, true, time.Second},
+		{"failed sample retains stale guest pressure", cage.ResourceStatus{ObservedAt: now.Add(-time.Minute), Error: "资源采样暂时不可用，已暂停内存回收", Pressure: true}, true, time.Second},
+		{"current guest pressure", cage.ResourceStatus{ObservedAt: now, Pressure: true}, false, time.Second},
+		{"current host pressure", cage.ResourceStatus{HostPressure: true}, false, time.Second},
+		{"sustained memory pressure", cage.ResourceStatus{ObservedAt: now, Pressure: true, HostPressure: true}, true, time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, gate := failedMonitoringServer(t)
-			s.recovery.Next = time.Now().Add(-time.Second)
+			s.recovery.Next = time.Now().Add(-tc.overdue)
 			tc.status.Version, tc.status.UpdatedAt = 1, time.Now()
 			if err := writePrivate(filepath.Join(s.instanceDir(), "cage-resources.json"), tc.status); err != nil {
 				t.Fatal(err)

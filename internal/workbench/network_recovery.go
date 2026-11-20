@@ -12,6 +12,8 @@ import (
 	"github.com/sylvinus/agent-vm/internal/usererror"
 )
 
+const recoveryPressureGrace = time.Minute
+
 type networkRecovery struct {
 	RunID, Configuration string
 	PauseVersion         uint64
@@ -48,7 +50,7 @@ func (s *Server) networkRecoveryMessageLocked(now time.Time) string {
 		seconds := (r.Next.Sub(now) + time.Second - 1) / time.Second
 		return fmt.Sprintf("自动重检将在 %d 秒后尝试", seconds)
 	}
-	if r.pressureLogged {
+	if r.pressureLogged && now.Before(r.Next.Add(recoveryPressureGrace)) {
 		return "自动重检正在等待内存压力缓解"
 	}
 	return "自动重检正在等待后台调度"
@@ -104,7 +106,7 @@ func (s *Server) recoverNetwork() {
 	// Only a recent pressure measurement should postpone the full gate check.
 	resources, err := cage.ReadResourceStatus(s.instanceDir())
 	guestPressure := resources.Pressure && time.Since(resources.ObservedAt) <= 10*time.Second
-	if err == nil && (guestPressure || resources.HostPressure) {
+	if err == nil && (guestPressure || resources.HostPressure) && time.Now().Before(r.Next.Add(recoveryPressureGrace)) {
 		timing.result = "memory_pressure"
 		s.mu.Lock()
 		logWait := s.recovery == r && !r.pressureLogged
