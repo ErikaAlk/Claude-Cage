@@ -41,7 +41,9 @@ func TestStageSymlink(t *testing.T) {
 	os.MkdirAll(filepath.Dir(real), 0o755)
 	os.WriteFile(real, []byte("v1"), 0o644)
 	link := filepath.Join(dir, ".gitconfig")
-	os.Symlink(real, link)
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlink unavailable: " + err.Error())
+	}
 	dst := filepath.Join(dir, "stage", "f")
 	if !Stage(link, dst, io.Discard) {
 		t.Fatal("not staged")
@@ -86,14 +88,27 @@ func TestUnsafeLocationNoCase(t *testing.T) {
 // folder are not.
 func TestCredentialLocation(t *testing.T) {
 	s := newSandbox(t)
-	for _, d := range []string{".ssh/keys", ".config/gcloud", "Library/Keychains", ".local/share/keyrings", ".local/src", ".sshx", "work/.ssh-notes", ".mozilla"} {
+	for _, d := range []string{".ssh/keys", ".config/gcloud", "Library/Keychains", ".local/share/keyrings", ".local/src", ".sshx", "work/.ssh-notes", ".mozilla",
+		"Library/CloudStorage/OneDrive-personal/proj", "Library/CloudStorage/provider",
+		"Library/Mobile Documents/com~apple~CloudDocs/proj", "Library/Mobile Documents/iCloud~com~vendor~app/Documents",
+		"Library/CloudStorage2/x", "Library/Mobile Documents/com~apple~CloudDocs-old/x"} {
 		os.MkdirAll(filepath.Join(s.home, d), 0o755)
 	}
 	os.MkdirAll(filepath.Join(s.root, "appdata", "app"), 0o755)
 	t.Setenv("APPDATA", filepath.Join(s.root, "appdata"))
 	t.Setenv("LOCALAPPDATA", "")
 	t.Setenv("XDG_CONFIG_HOME", "")
-	os.Symlink(s.home+"/.ssh", s.proj+"/lnk")
+	// Without symlinks the link cases are left out and reported as a skip,
+	// so a missing link is not mistaken for a guard letting it through.
+	var linkErr error
+	symlink := func(oldname, newname string) bool {
+		err := os.Symlink(oldname, newname)
+		if err != nil && linkErr == nil {
+			linkErr = err
+		}
+		return err == nil
+	}
+	linked := symlink(s.home+"/.ssh", s.proj+"/lnk")
 	refs := s.refs()
 	for _, c := range []struct {
 		dir string
@@ -110,6 +125,18 @@ func TestCredentialLocation(t *testing.T) {
 		{s.home + "/.local/share/keyrings", true},
 		{s.proj + "/lnk", true},
 		{s.root + "/appdata/app", true},
+		// The cloud drives under ~/Library go through; ~/Library itself,
+		// its aggregates and its other folders do not.
+		{s.home + "/Library/CloudStorage/OneDrive-personal/proj", false},
+		{s.home + "/Library/CloudStorage/provider", false},
+		{s.home + "/Library/Mobile Documents/com~apple~CloudDocs", false},
+		{s.home + "/Library/Mobile Documents/com~apple~CloudDocs/sub", false},
+		{s.home + "/Library/CloudStorage", true},
+		{s.home + "/Library", true},
+		{s.home + "/Library/Mobile Documents", true},
+		{s.home + "/Library/Mobile Documents/iCloud~com~vendor~app/Documents", true},
+		{s.home + "/Library/CloudStorage2/x", true},
+		{s.home + "/Library/Mobile Documents/com~apple~CloudDocs-old/x", true},
 		{s.proj, false},
 		{s.proj + "/sub", false},
 		{s.home + "/.local/src", false},
@@ -117,6 +144,9 @@ func TestCredentialLocation(t *testing.T) {
 		{s.home + "/work/.ssh-notes", false},
 		{s.root + "/data/a", false},
 	} {
+		if c.dir == s.proj+"/lnk" && !linked {
+			continue
+		}
 		why, bad := CredentialLocation(c.dir, refs)
 		if bad != c.bad {
 			t.Errorf("%s: %q %v", c.dir, why, bad)
@@ -131,9 +161,23 @@ func TestCredentialLocation(t *testing.T) {
 	// A credentials folder that is a link to another: that one counts too.
 	os.RemoveAll(s.home + "/.aws")
 	os.MkdirAll(s.root+"/dotfiles/aws", 0o755)
-	os.Symlink(s.root+"/dotfiles/aws", s.home+"/.aws")
-	if _, bad := CredentialLocation(s.root+"/dotfiles/aws", refs); !bad {
-		t.Error("the target of ~/.aws was let through")
+	if symlink(s.root+"/dotfiles/aws", s.home+"/.aws") {
+		if _, bad := CredentialLocation(s.root+"/dotfiles/aws", refs); !bad {
+			t.Error("the target of ~/.aws was let through")
+		}
+	}
+	// A cloud drive reached through a link counts, as dir is resolved.
+	if symlink(s.home+"/Library/CloudStorage/OneDrive-personal", s.home+"/OneDrive") {
+		if _, bad := CredentialLocation(s.home+"/OneDrive/proj", refs); bad {
+			t.Error("a link to a cloud drive was refused")
+		}
+	}
+	// A cloud drive's name on a link elsewhere: the Library rule holds.
+	os.MkdirAll(s.home+"/Library/Keychains/proj", 0o755)
+	if symlink(s.home+"/Library/Keychains", s.home+"/CloudStorage") {
+		if _, bad := CredentialLocation(s.home+"/CloudStorage/proj", refs); !bad {
+			t.Error("a link named CloudStorage, to Keychains, was let through")
+		}
 	}
 	// Other capitals, where the file system ignores case.
 	old := paths.NoCase
@@ -142,5 +186,14 @@ func TestCredentialLocation(t *testing.T) {
 	refs = s.refs()
 	if _, bad := CredentialLocation(strings.ToUpper(s.home)+"/.SSH", refs); !bad {
 		t.Error("~/.SSH let through where case is ignored")
+	}
+	if _, bad := CredentialLocation(strings.ToUpper(s.home+"/Library/CloudStorage/OneDrive-personal/proj"), refs); bad {
+		t.Error("a cloud drive in capitals refused where case is ignored")
+	}
+	if _, bad := CredentialLocation(strings.ToUpper(s.home+"/Library/Keychains"), refs); !bad {
+		t.Error("Keychains in capitals let through where case is ignored")
+	}
+	if linkErr != nil {
+		t.Skip("symlink unavailable, the link cases were not checked: " + linkErr.Error())
 	}
 }

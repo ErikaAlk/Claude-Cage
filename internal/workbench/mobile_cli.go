@@ -21,14 +21,12 @@ var mobileSupervisor string
 
 var mobileCCSProfile = regexp.MustCompile("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
-type mobileEpochKey struct{}
-
 var errMobileLocked = errors.New("Cage 已锁定，请重新解锁后操作")
 
 // Caller holds the account mutex. An operation begun under an old unlock
 // must not gain authority from a later unlock of the same account.
 func (s *Server) mobileAuthorized(ctx context.Context) bool {
-	epoch, _ := ctx.Value(mobileEpochKey{}).(context.Context)
+	epoch, _ := ctx.Value(accountEpochKey{}).(context.Context)
 	return len(s.account.key) == 32 && epoch != nil && epoch == s.account.epoch && epoch.Err() == nil && ctx.Err() == nil
 }
 
@@ -58,7 +56,7 @@ func sharedCLILauncher(launcher string) bool {
 	return err == nil
 }
 
-func (s *Server) mobileRunner(prefix []string) cliconversation.Runner {
+func (s *Server) mobileRunner(prefix []string, accountID string) cliconversation.Runner {
 	return cliconversation.Runner{SupervisedStdin: true, Command: func(ctx context.Context, workspace string, args []string) (*exec.Cmd, error) {
 		directories, err := s.projectAdditionalDirectories(workspace)
 		if err != nil {
@@ -75,6 +73,12 @@ func (s *Server) mobileRunner(prefix []string) cliconversation.Runner {
 			login, "cage-mobile-cli", guestPath(workspace)}
 		argv = append(argv, mobileIdentityCommand(prefix, args)...)
 		command := "exec " + shellescape.QuoteCommand(argv)
+		if accountID != "" {
+			command, err = s.routeAccountCommand(ctx, accountID, command)
+			if err != nil {
+				return nil, err
+			}
+		}
 		return s.sshCommand(ctx, "-T", s.sshTarget(), "--", command), nil
 	}}
 }
@@ -84,9 +88,6 @@ func (s *Server) mobileRunner(prefix []string) cliconversation.Runner {
 // launcher are fixed on the first accepted turn, including subsequent resumes.
 func (s *Server) prepareMobileLaunch(record *mobileRecord) (claudeSelection, string, cliconversation.Runner, error) {
 	var empty cliconversation.Runner
-	if s.windowsGuest != nil {
-		return claudeSelection{}, "", empty, errWindowsLegacyMobile
-	}
 	s.mu.Lock()
 	ready, closing, update, configured := s.ready, s.closing, s.guestUpdateRequired, claudeTerminalCommand(s.preferences)
 	s.mu.Unlock()
@@ -130,12 +131,12 @@ func (s *Server) prepareMobileLaunch(record *mobileRecord) (claudeSelection, str
 		if account == nil || !account.Enabled || account.Status != "ready" || account.guestID() != selection.GuestID || claudeIdentityHash(account.Email, account.Organization) != selection.Subject {
 			return selection, "", empty, errors.New("原会话的 Claude 账号已停用或发生变化")
 		}
-		if _, err = s.terminals.existingClaudeLogin(selection.ID, false); err != nil {
+		if _, err = s.terminals.existingProfileLogin(selection, false); err != nil {
 			return selection, "", empty, err
 		}
 	}
 	prefix, err := mobileLaunchArgs(launcher, selection)
-	return selection, launcher, s.mobileRunner(prefix), err
+	return selection, launcher, s.mobileRunner(prefix, selection.ID), err
 }
 
 func findMobileTurn(record *mobileRecord, id string) *mobileTurn {

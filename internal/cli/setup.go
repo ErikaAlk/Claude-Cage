@@ -459,6 +459,11 @@ func (e *app) buildBase(ctx context.Context, in install, disk, memory, cpus int)
 		if err != nil {
 			fmt.Fprintf(log, "%v\n", err)
 			fmt.Fprintf(e.io.Stderr, "Error: %s\n", diagnostics.Redact(err.Error()))
+			// Redaction hides each image location; name them by fixed codes.
+			if summary := vm.ImageDownloadSummary(err); summary != "" {
+				fmt.Fprintln(log, summary)
+				fmt.Fprintln(e.io.Stderr, summary)
+			}
 			if f, ok := e.io.Stdout.(*os.File); ok && ui.IsTerminal(f) && os.Getenv(cage.ConfigEnv) == "" {
 				fmt.Fprint(e.io.Stderr, ui.Tail(logPath, 20))
 			}
@@ -483,7 +488,7 @@ func (e *app) buildBase(ctx context.Context, in install, disk, memory, cpus int)
 	(&start{app: e, ctx: ctx, name: building}).printResources()
 
 	fmt.Fprintln(e.io.Stdout, "Starting the selected base system...")
-	if !windowed(func(w io.Writer) error { return e.startVM(ctx, b, building, w) }) {
+	if !windowed(func(w io.Writer) error { return e.startVM(vm.WithFirstBoot(ctx), b, building, w) }) {
 		ha := filepath.Join(LimaHome(e.state), building, "ha.stderr.log")
 		fmt.Fprintf(e.io.Stderr, "Error: Failed to start base VM. Full log: %s\nLima's own log: %s\n", logPath, ha)
 		host.WindowsStartHint(e.io.Stderr, logPath, ha)
@@ -543,7 +548,7 @@ func (e *app) buildBase(ctx context.Context, in install, disk, memory, cpus int)
 	}
 	// Only worth saying to someone with a VM to re-clone.
 	if vms, err := e.agentVMs(ctx); err == nil && len(vms) > 1 {
-		fmt.Fprint(e.io.Stdout, "\nNote: Existing VMs were not updated. Use --reset to re-clone them from the new base.\n")
+		fmt.Fprint(e.io.Stdout, "\n"+staleBaseHint(true)+"\n")
 	}
 	return 0
 }
@@ -554,7 +559,7 @@ func cageInstallEnv() string {
 		if os.Getenv("CAGE_SETUP_PROGRESS") == "1" {
 			progress = "export CAGE_SETUP_PROGRESS=1\n"
 		}
-		return "set -e\nexport CLAUDE_CAGE=1\n" + progress + cage.DebianPrepareScript + "\n" + cage.ToolInstallPrelude()
+		return "set -e\nexport CLAUDE_CAGE=1\n" + progress + cage.InstallTLS12Prelude(os.Getenv(cage.InstallTLS12Env) == "1") + cage.DebianPrepareScriptFor(os.Getenv(cage.DebianMirrorEnv)) + "\n" + cage.ToolInstallPrelude()
 	}
 	return ""
 }

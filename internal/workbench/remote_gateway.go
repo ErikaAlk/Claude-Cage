@@ -11,19 +11,22 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sylvinus/agent-vm/internal/desktop"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
 const connectionHeader = "X-Cage-Connection"
 
 type remoteGateway struct {
-	mu           sync.Mutex
-	remote       bool
-	clientOnly   bool
-	clientShares map[string]*clientProjectGrant
-	store        *remotehost.Store
-	manager      *remotehost.Manager
-	desktop      *desktopGateway
+	mu             sync.Mutex
+	remote         bool
+	clientOnly     bool
+	clientShares   map[string]*clientProjectGrant
+	pluginServices *remotePluginSessionServices
+	approvalAsk    func(context.Context, string, string) (desktop.Scope, bool)
+	store          *remotehost.Store
+	manager        *remotehost.Manager
+	desktop        *desktopGateway
 }
 
 func newRemoteGateway(profile string) *remoteGateway {
@@ -37,6 +40,7 @@ func (g *remoteGateway) close() {
 	}
 	_ = g.manager.Close()
 	g.drainClosedClientShares()
+	g.closeRemotePluginServices()
 }
 
 func (g *remoteGateway) isRemote() bool {
@@ -112,8 +116,13 @@ func (s *Server) clientRequest(w http.ResponseWriter, r *http.Request) {
 		s.clientProjectShareRequest(w, r, path)
 		return
 	}
+	if path == "plugins/sync" || path == "plugins/bridge" {
+		s.clientPluginsRequest(w, r, path)
+		return
+	}
 	if path == "commit" || path == "disconnect" || path == "local" {
 		defer g.drainClosedClientShares()
+		defer g.drainClosedRemotePluginServices()
 	}
 	if g.desktop != nil && g.desktop.handle(path, w, r) {
 		return
@@ -271,8 +280,12 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 	} else {
 		session, err = s.remote.manager.Acquire(requestConnection(r))
 	}
-	if remote && r.URL.Path == "/api/projects/client-share" {
+	if remote && (r.URL.Path == "/api/projects/client-share" || r.URL.Path == "/api/host-tools/approvals/channel" || r.URL.Path == "/api/host-tools/client-bridge") {
 		http.NotFound(w, r)
+		return true
+	}
+	if remote && r.Method == http.MethodPost && (r.URL.Path == "/api/host-tools" || r.URL.Path == "/api/host-tools/sync") && !s.hasTrustedView(r) {
+		http.Error(w, "请在本机 Cage 窗口管理远程插件", http.StatusForbidden)
 		return true
 	}
 	if remote && (r.URL.Path == "/api/environment/storage" || r.URL.Path == "/api/environment/storage/recover") {
@@ -282,6 +295,9 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 	if err != nil {
 		http.Error(w, "连接不可用或已切换，请重新选择工作环境", 409)
 		return true
+	}
+	if remote && session != nil {
+		s.remote.ensureRemotePluginServices(session, s.remote.context().Name, s.hostViewProfile())
 	}
 	if r.URL.Path == "/api/diagnostics/export" {
 		if !s.diagnosticMu.TryLock() {
@@ -354,6 +370,12 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 				}
 				switch contentType {
 				case "application/json", "text/plain", "text/event-stream", "application/octet-stream", "application/zip", "image/png", "image/jpeg", "image/webp":
+				case "image/svg+xml":
+					if r.Method != http.MethodGet || r.URL.Path != hostPluginIconPath || response.StatusCode != http.StatusOK {
+						return errors.New("remote SVG is only allowed for plugin icons")
+					}
+					// The gateway strips upstream policies. Apply our own sandbox to the icon.
+					response.Header.Set("Content-Security-Policy", hostPluginIconCSP)
 				default:
 					return errors.New("remote active content is refused")
 				}

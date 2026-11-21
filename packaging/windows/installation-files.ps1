@@ -1,7 +1,7 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('prepare', 'move', 'restore', 'cleanup', 'complete', 'uninstall', 'detach', 'attach')][string]$Operation,
+    [Parameter(Mandatory)][ValidateSet('prepare', 'move', 'restore', 'cleanup', 'complete', 'abandon', 'uninstall', 'detach', 'attach')][string]$Operation,
     [Parameter(Mandatory)][string]$Target,
     [string]$Source,
     [string]$Receipt,
@@ -188,6 +188,20 @@ function Save-Transfer($Transfer) {
         $Transfer | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporary -Encoding UTF8
         [IO.File]::Replace($temporary, $Receipt, [NullString]::Value)
     } finally { if (Test-Path -LiteralPath $temporary) { [IO.File]::Delete($temporary) } }
+}
+
+function Test-HasExistingContent([string]$Path) {
+    if (!$Path) { return $false }
+    $item = $null
+    try { $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch [Management.Automation.ItemNotFoundException], [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+        return $false
+    } catch {
+        return $true
+    }
+    if (!$item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $true }
+    try { return @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop).Count -gt 0 }
+    catch { return $true }
 }
 
 function Complete-Transfer {
@@ -381,6 +395,20 @@ if ($Operation -eq 'prepare') {
 } elseif ($Operation -eq 'complete') {
     $diagnosticStep = 'completing_transaction_receipt'
     Complete-Transfer
+} elseif ($Operation -eq 'abandon') {
+    # A first installation that could not publish its staged folder has no
+    # previous installation, backup or moved entry to recover. Only then is
+    # its receipt removed, so that the installation can be retried.
+    $diagnosticStep = 'abandoning_first_installation'
+    $transfer = Get-Content -LiteralPath $Receipt -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($transfer.kind -ne 'cage-installation' -or $transfer.backupPath -or @($transfer.moves).Count -or @($transfer.files).Count -or
+        @($transfer.directories).Count -or (Test-HasExistingContent $transfer.installPath) -or (Test-HasExistingContent $Target)) {
+        throw '安装事务涉及已有文件，回执已保留待核对。'
+    }
+    $receiptStream = Open-ReadLocked $Receipt
+    try { $hash = Stream-Hash $receiptStream } finally { $receiptStream.Dispose() }
+    Remove-MatchingFile (Split-Path $Receipt -Parent) (Split-Path $Receipt -Leaf) $hash
+    if (Test-Path -LiteralPath $Receipt) { throw '安装回执在完成期间发生变化，已保留待核对。' }
 } else {
     # The payload list comes from this uninstaller's embedded build manifest.
     $diagnosticStep = 'reading_uninstall_manifest'
