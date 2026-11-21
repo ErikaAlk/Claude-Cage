@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"github.com/sylvinus/agent-vm/internal/cage"
-	"github.com/sylvinus/agent-vm/internal/guestos"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"os"
 	"path/filepath"
@@ -18,6 +18,14 @@ func proxyCommand(command, profile string, cfg cage.Config) error {
 		return managedproxy.Stop(profile)
 	}
 	p, err := managedproxy.Applied(profile, cfg.ProxyURL, cfg.ProxyRevision)
+	if errors.Is(err, managedproxy.ErrLocalProxyNode) {
+		closeErr := closeManagedGates(profile)
+		_, runtimeErr := managedproxy.BoundInterface(filepath.Join(managedproxy.Dir(profile), "config.yaml"))
+		if errors.Is(runtimeErr, managedproxy.ErrLocalProxyNode) {
+			return errors.Join(err, closeErr, managedproxy.Stop(profile))
+		}
+		return errors.Join(err, closeErr)
+	}
 	if err != nil {
 		return err
 	}
@@ -34,6 +42,7 @@ func proxyCommand(command, profile string, cfg cage.Config) error {
 		return err
 	}
 	p.Revision = managedproxy.Token()
+	p.GuestDNS, p.BootstrapDNS = cfg.DNSEndpoints(), cfg.BootstrapEndpoints()
 	cfg.ProxyRevision = p.Revision
 	if err = p.Save(profile); err != nil {
 		return err
@@ -83,12 +92,5 @@ func managedGateFiles(profile string) ([]string, error) {
 	files, _ := filepath.Glob(filepath.Join(profile, "state", "lima", "*", "cage-gate.json"))
 	containers, _ := filepath.Glob(filepath.Join(profile, "state", "container", "*", "cage-gate.json"))
 	files = append(files, containers...)
-	binding, err := guestos.LoadWindowsProfile(profile)
-	if err != nil {
-		return nil, err
-	}
-	if binding != nil {
-		files = append(files, filepath.Join(binding.InstanceDirectory, "cage-gate.json"))
-	}
 	return files, nil
 }

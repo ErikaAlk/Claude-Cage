@@ -1,18 +1,16 @@
 package guestos
 
 import (
-	"bytes"
-	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"github.com/google/uuid"
-	"golang.org/x/crypto/ssh"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestInstallationKeepsChoiceAndRefusesToClearVM(t *testing.T) {
+func TestInstallationKeepsChoiceAndWithdrawsWithoutTouchingVM(t *testing.T) {
 	p := t.TempDir()
 	first := Installation{Version: 1, System: MacOS, ID: uuid.New()}
 	if err := SaveInstallation(p, first); err != nil {
@@ -33,22 +31,16 @@ func TestInstallationKeepsChoiceAndRefusesToClearVM(t *testing.T) {
 	if err := os.MkdirAll(disk, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := ClearUnstartedInstallation(p, first.ID); err == nil {
-		t.Fatal("forgot a partially installed VM")
-	}
-	got, err := LoadInstallation(p)
-	if err != nil || got == nil || *got != first {
-		t.Fatalf("changed original selection: %v %v", got, err)
-	}
-	if err := os.Remove(disk); err != nil {
-		t.Fatal(err)
-	}
+	// The installation can no longer continue, so the record goes while
+	// whatever was created for it stays.
 	if err := ClearUnstartedInstallation(p, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	got, err = LoadInstallation(p)
-	if err != nil || got != nil {
-		t.Fatal("failed to clear media-only choice")
+	if got, err := LoadInstallation(p); err != nil || got != nil {
+		t.Fatalf("record remains: %v %v", got, err)
+	}
+	if _, err := os.Stat(disk); err != nil {
+		t.Fatalf("partial VM was touched: %v", err)
 	}
 }
 
@@ -67,41 +59,28 @@ func TestWindowsInstallRequiresMediaDigestAndEditorAgreement(t *testing.T) {
 	}
 }
 
-func TestMacSerialIdentityIsUnambiguous(t *testing.T) {
-	newKey := func() []byte {
-		pub, _, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatal(err)
-		}
-		key, err := ssh.NewPublicKey(pub)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return ssh.MarshalAuthorizedKey(key)
+func TestMacInstallAcceptsLocalRestoreImageDigest(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "system.ipsw")
+	if err := os.WriteFile(media, []byte("restore image"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	key := newKey()
-	prefix := "CAGE-GUEST-HOST-KEY "
-	line := prefix + strings.TrimSpace(string(key)) + " guest\r\n"
-	got, err := parseInstallHostKey(strings.NewReader("startup\n" + line + line))
-	if err != nil || !bytes.Equal(key, got) {
-		t.Fatalf("valid serial identity: %v", err)
+	sum := sha256.Sum256([]byte("restore image"))
+	digest := hex.EncodeToString(sum[:])
+	i := Installation{Version: 1, System: MacOS, ID: uuid.New(), Media: media, SHA256: digest}
+	if err := i.Validate(); err != nil {
+		t.Fatal(err)
 	}
-	for _, body := range []string{"", "other " + line, line + prefix + "bad", line + prefix + string(newKey())} {
-		if _, err := parseInstallHostKey(strings.NewReader(body)); err == nil {
-			t.Fatal("accepted missing or inconsistent identity")
+	for name, bad := range map[string]Installation{
+		"short digest":         {Version: 1, System: MacOS, ID: i.ID, Media: media, SHA256: "bad"},
+		"digest without media": {Version: 1, System: MacOS, ID: i.ID, SHA256: digest},
+		"other image format":   {Version: 1, System: MacOS, ID: i.ID, Media: filepath.Join(dir, "system.iso"), SHA256: digest},
+	} {
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("accepted %s", name)
 		}
 	}
-}
-
-func TestInitialMacPasswordCanBeEnteredAtTheLoginWindow(t *testing.T) {
-	for _, value := range []string{"Mix @#?9", strings.Repeat("!", 256)} {
-		if !ValidMacOSInstallPassword(value) {
-			t.Fatal("rejected an enterable password")
-		}
-	}
-	for _, value := range []string{"short", "中文输入示例密码", "abcde\tfgh", strings.Repeat("a", 257)} {
-		if ValidMacOSInstallPassword(value) {
-			t.Fatal("accepted an unsupported password")
-		}
+	if err := (Installation{Version: 1, System: MacOS, ID: i.ID, Media: media, SHA256: "bad"}).Validate(); err == nil || strings.Contains(err.Error(), ".ipsw") {
+		t.Fatalf("digest error should not blame the image format: %v", err)
 	}
 }

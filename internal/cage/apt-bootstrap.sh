@@ -6,6 +6,13 @@ set -eu
 if [ "$ID" != debian ] || [ "${VERSION_ID:-}" != 13 ]; then
   exit 0
 fi
+# A package transaction cut off by a stopped environment or a power loss leaves
+# dpkg's journal behind, and every later apt-get refuses to run until it is
+# replayed. Replaying it only finishes the packages that were already chosen.
+if [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ]; then
+  printf 'Finishing an interrupted package installation...\n'
+  env DEBIAN_FRONTEND=noninteractive dpkg --configure -a </dev/null
+fi
 version=$(dpkg-query -W -f='${Version}' apt)
 if dpkg --compare-versions "$version" ge 3.0.4; then
   exit 0
@@ -19,11 +26,18 @@ mkdir -m 0755 "$stage/lists"
 # Debian archive signature and package hashes; no insecure options are enabled.
 printf '%s\n' 'deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian-security trixie-security main' > "$stage/security.list"
 apt_bootstrap_get() {
-  env DEBIAN_FRONTEND=noninteractive apt-get \
+  if env DEBIAN_FRONTEND=noninteractive apt-get \
     -o Acquire::Retries=0 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
     -o DPkg::Lock::Timeout=60 -o APT::Update::Error-Mode=any \
     -o Dir::Etc::sourcelist="$stage/security.list" -o Dir::Etc::sourceparts=- \
-    -o Dir::State::lists="$stage/lists" "$@" </dev/null
+    -o Dir::State::lists="$stage/lists" "$@" </dev/null; then
+    return 0
+  else
+    status=$?
+  fi
+  # The same marker as agent-vm.setup.sh, so the host can name the failure.
+  printf 'APT_FAILED exit=%s command=apt-get %s\n' "$status" "$*" >&2
+  return "$status"
 }
 apt_bootstrap_get update
 packages='apt libapt-pkg7.0'

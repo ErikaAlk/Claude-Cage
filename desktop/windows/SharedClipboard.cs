@@ -7,13 +7,19 @@ namespace Cage.Windows;
 internal static class SharedClipboard
 {
     private static int generation;
+    private static CancellationTokenSource sends = new();
     private static readonly Dictionary<string, string[]> copies = new();
     private static readonly List<string[]> readers = new();
     private static readonly HashSet<string> pending = new();
     private static readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
     private static bool watching, loaded, collecting;
 
-    public static void Cancel() => generation++;
+    public static void Cancel()
+    {
+        generation++;
+        var canceled = sends; sends = new();
+        canceled.Cancel(); canceled.Dispose();
+    }
     [DllImport("user32.dll")]
     private static extern uint GetClipboardSequenceNumber();
     public static uint Revision
@@ -76,9 +82,15 @@ internal static class SharedClipboard
         finally { collecting = false; }
     }
 
+    private static string ConnectionID(JsonElement request)
+    {
+        var connection = request.Text("connection_id");
+        return string.IsNullOrEmpty(connection) ? "local" : connection;
+    }
+
     private static async Task ReleaseRemote(string connection, string id, CancellationToken token)
     {
-        var response = await Backend.Json(["clipboard-files", "--json", "--connection", connection, "release", id], token, TimeSpan.FromSeconds(10));
+        var response = await Backend.Json(["clipboard-files", "--json", "--connection", string.IsNullOrEmpty(connection) ? "local" : connection, "release", id], token, TimeSpan.FromSeconds(10));
         if (response.Exit != 0) throw new IOException("clipboard_selection_release_failed");
     }
 
@@ -86,8 +98,18 @@ internal static class SharedClipboard
     {
         var id = request.Text("files");
         if (!Guid.TryParse(id, out _)) throw new InvalidDataException("剪贴板文件标识无效");
-        await ReleaseRemote(request.Text("connection_id"), id, token);
+        await ReleaseRemote(ConnectionID(request), id, token);
         return new { ok = true };
+    }
+
+    // Word processors and spreadsheets publish a rendered picture next to the
+    // text they copied. Such a copy is text: sharing the picture would replace
+    // the text with an image on both sides.
+    public static string? RichText()
+    {
+        if (!Clipboard.ContainsText() || !Clipboard.ContainsData(DataFormats.Rtf)) return null;
+        var text = Clipboard.GetText();
+        return text.Length > 0 ? text : null;
     }
 
     public static async Task<object> Read(JsonElement request, CancellationToken token)
@@ -97,22 +119,28 @@ internal static class SharedClipboard
         if (Clipboard.ContainsFileDropList())
         {
             var selected = Clipboard.GetFileDropList().Cast<string>().ToArray();
+            if (request.TryGetProperty("defer_files", out var defer) && defer.ValueKind == JsonValueKind.True)
+                return new { revision, files_pending = true, count = selected.Length };
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token, sends.Token);
             readers.Add(selected);
             try
             {
-                var arguments = new List<string> { "clipboard-files", "--json", "--connection", request.Text("connection_id"), "send" };
+                var connection = ConnectionID(request);
+                var arguments = new List<string> { "clipboard-files", "--json", "--connection", connection, "send" };
                 arguments.AddRange(selected);
-                var response = await Backend.Json(arguments.ToArray(), token, TimeSpan.FromMinutes(30));
+                var response = await Backend.Json(arguments.ToArray(), cancellation.Token, TimeSpan.FromMinutes(30));
                 if (response.Exit != 0) throw new IOException(response.Data.Text("message"));
                 var files = response.Data.Text("files");
                 if (capturedGeneration != generation || revision != Revision)
                 {
-                    try { await ReleaseRemote(request.Text("connection_id"), files, CancellationToken.None); } catch { }
+                    try { await ReleaseRemote(connection, files, CancellationToken.None); } catch { }
                 }
                 return new { revision, files };
             }
+            catch (OperationCanceledException) { throw new IOException("剪贴板文件传递已取消"); }
             finally { readers.Remove(selected); await Collect(); }
         }
+        if (RichText() is { } copied) return new { revision, text = copied };
         if (Clipboard.ContainsImage())
         {
             using var image = Clipboard.GetImage() ?? throw new IOException("无法读取剪贴板图片");
@@ -136,7 +164,7 @@ internal static class SharedClipboard
             if (!Guid.TryParse(id, out _)) throw new InvalidDataException("剪贴板文件标识无效");
             try
             {
-                var response = await Backend.Json(["clipboard-files", "--json", "--connection", request.Text("connection_id"), "receive", id], token, TimeSpan.FromMinutes(30));
+                var response = await Backend.Json(["clipboard-files", "--json", "--connection", ConnectionID(request), "receive", id], token, TimeSpan.FromMinutes(30));
                 if (response.Exit != 0) throw new IOException(response.Data.Text("message"));
                 paths = response.Data.GetProperty("paths").EnumerateArray().Select(value => value.GetString()!).ToArray();
                 cache = response.Data.Text("cache_id");

@@ -53,3 +53,11 @@ func TestCLIStartupScreenDiscardsPriorDialogs(t *testing.T) {
 		})
 	}
 }
+
+func TestChannelStartupOnlyAcceptsThisConnection(t *testing.T) {
+	current := "1a53911b-5ee6-4f97-8e82-b905c714ab07"
+	text := cliStartupText([]byte("WARNING: Loading development channels\nChannels: server:" + current + "\n❯ 1. I am using this for local development"))
+	if cliStartupDialog(text, "", current) != "channel" || cliStartupDialog(text, "", "cage") != "" {
+		t.Fatal("did not bind startup dialog to the actual channel")
+	}
+}

@@ -12,7 +12,7 @@ import (
 )
 
 var cliStartupEscape = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-var cliOwnedChannel = regexp.MustCompile(`Channels:server:([0-9a-fA-F-]{36})(?:[❯›>]?1\.|Iamusingthisforlocaldevelopment)`)
+var cliOwnedChannel = regexp.MustCompile(`Channels:server:([A-Za-z0-9_-]+?)(?:[❯›>]?1\.|Iamusingthisforlocaldevelopment)`)
 
 type cliStartupScreen struct {
 	emulator *vt.Emulator
@@ -58,12 +58,12 @@ func cliStartupText(data []byte) string {
 // Cage already owns this locally generated channel and the user has granted
 // access to this project. Only their two startup dialogs can be completed here.
 // Tool approvals, external MCP servers and login dialogs remain untouched.
-func cliStartupDialog(text, workspace, connection string) string {
-	channel := cliOwnedChannel.FindStringSubmatch(text)
-	if validCLIUUID(connection) && len(channel) == 2 && channel[1] == connection &&
-		strings.Contains(text, "WARNING:Loadingdevelopmentchannels") &&
+func cliStartupDialog(text, workspace, channel string) string {
+	if strings.Contains(text, "WARNING:Loadingdevelopmentchannels") &&
 		strings.Contains(text, "Iamusingthisforlocaldevelopment") {
-		return "channel"
+		if match := cliOwnedChannel.FindStringSubmatch(text); len(match) == 2 && match[1] == channel {
+			return "channel"
+		}
 	}
 	if workspace != "" && strings.Contains(strings.ToLower(text), "quicksafetycheck:isthisaprojectyoucreatedoroneyoutrust?") &&
 		strings.Contains(text, cliStartupText([]byte(workspace))) &&
@@ -93,11 +93,12 @@ func (s *Server) prepareCLIConnection(terminal *terminalSession, id string) {
 		ctx, cancel := context.WithTimeout(s.lifetimeContext(), 45*time.Second)
 		defer cancel()
 		s.mobileCLI.mu.Lock()
-		record, err := s.mobileCLI.record(s.profile, id)
+		currentRecord, err := s.mobileCLI.record(s.profile, id)
 		if err != nil {
 			s.mobileCLI.mu.Unlock()
 			return
 		}
+		record := *currentRecord
 		cliID, config, connection, workspace := record.CLIID, record.GuestConfig, record.Connection, record.GuestWorkspace
 		s.mobileCLI.mu.Unlock()
 		ticker := time.NewTicker(200 * time.Millisecond)
@@ -124,8 +125,11 @@ func (s *Server) prepareCLIConnection(terminal *terminalSession, id string) {
 					var response struct {
 						OK bool `json:"ok"`
 					}
-					if err := s.runCLIChannel(ctx, "rpc", map[string]string{"cli_id": cliID, "connection": connection, "action": "resume"}, &response); err != nil || !response.OK {
+					if err := s.runCLIChannel(ctx, "rpc", resumeChannelRequest(&record), &response); err != nil || !response.OK {
 						continue
+					}
+					if !isClientMountPath(record.Workspace) {
+						s.serveCodexChannel(terminal, &record, s.codexWindow())
 					}
 					return
 				}

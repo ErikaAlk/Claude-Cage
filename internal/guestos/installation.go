@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,32 +26,20 @@ type Installation struct {
 	EditorTerms bool           `json:"editor_terms,omitempty"`
 	ID          uuid.UUID      `json:"id"`
 	Source      hostimage.Plan `json:"source,omitzero"`
-	// Empty preserves legacy host-clone records. LinuxImageSource selects a
-	// catalog image independently of the physical host OS.
+	// Empty marks a host-matched image. LinuxImageSource marks the catalog
+	// Ubuntu image of earlier versions.
 	SourceKind string `json:"source_kind,omitempty"`
 }
 
 const installRecord = "guest-install.json"
+
+// LinuxImageSource and Ubuntu2204 identify the catalog Ubuntu guest earlier
+// versions installed. They remain so that those records can still be read.
 const LinuxImageSource = "linux-image"
 const Ubuntu2204 = "ubuntu-22.04"
 
-// Older installers could publish the binding before removing the temporary
-// credential. Keep those profiles in setup until their original cleanup runs.
-func WindowsCloneCleanupPending(profile string) (bool, error) {
-	install, err := LoadInstallation(profile)
-	if err != nil || install == nil || install.Source.Host.System != Windows11 {
-		return false, err
-	}
-	path := filepath.Join(profile, "windows-setup-"+strings.ReplaceAll(install.ID.String(), "-", "")+".dpapi")
-	_, err = os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
 func (i Installation) Validate() error {
-	if i.Version != 1 || i.ID == uuid.Nil || (i.System != MacOS && i.System != Windows11 && !hostimage.IsLinux(i.System)) {
+	if i.Version != 1 || i.ID == uuid.Nil || (i.System != MacOS && i.System != Windows11 && !hostimage.IsLinux(i.System) && !hostimage.AbandonedLinux(i.System)) {
 		return errors.New("客户机安装记录无效")
 	}
 	if i.SourceKind != "" && (i.SourceKind != LinuxImageSource || i.System != Ubuntu2204 || i.Source.Host.System != i.System) {
@@ -68,12 +57,20 @@ func (i Installation) Validate() error {
 		}
 		return i.Source.Validate()
 	}
-	if hostimage.IsLinux(i.System) {
+	if hostimage.IsLinux(i.System) || hostimage.AbandonedLinux(i.System) {
 		return errors.New("缺少 Linux 本机系统安装来源")
 	}
 	if i.System == MacOS {
-		if i.SHA256 != "" || (i.Media != "" && !strings.EqualFold(filepath.Ext(i.Media), ".ipsw")) {
+		if i.Media != "" && !strings.EqualFold(filepath.Ext(i.Media), ".ipsw") {
 			return errors.New("请选择 Apple 的 .ipsw 恢复镜像")
+		}
+		if i.SHA256 != "" {
+			if i.Media == "" {
+				return errors.New("SHA-256 只用于校验本机的 .ipsw 恢复镜像，请同时选择镜像文件")
+			}
+			if hash, err := hex.DecodeString(i.SHA256); err != nil || len(hash) != 32 {
+				return errors.New("恢复镜像的 SHA-256 格式无效，请填写完整的 64 位十六进制值")
+			}
 		}
 	} else if hash, err := hex.DecodeString(i.SHA256); i.Media == "" || !i.EditorTerms || err != nil || len(hash) != 32 || !strings.EqualFold(filepath.Ext(i.Media), ".iso") {
 		return errors.New("请选择 Windows 11 x64 ISO，并填写这份镜像的完整 SHA-256")
@@ -233,14 +230,18 @@ func ClearUnstartedInstallation(profile string, id uuid.UUID) error {
 	if pending == nil || pending.ID != id {
 		return errors.New("客户机安装选择已改变")
 	}
-	canClear, err := UnstartedInstallation(profile, *pending)
-	if err != nil {
-		return err
+	// A macOS or Windows installation can no longer continue, so its record
+	// is withdrawn even after it started. Whatever it created stays on disk.
+	if pending.System != MacOS && pending.System != Windows11 {
+		canClear, err := UnstartedInstallation(profile, *pending)
+		if err != nil {
+			return err
+		}
+		if !canClear {
+			return errors.New("已开始创建客户机，请继续原安装")
+		}
 	}
-	if !canClear {
-		return errors.New("已开始创建客户机，请继续原安装")
-	}
-	if hostimage.IsLinux(pending.System) {
+	if hostimage.IsLinux(pending.System) || hostimage.AbandonedLinux(pending.System) {
 		if err := hostimage.ClearLinuxTemplate(filepath.Join(profile, "state"), pending.Source); err != nil {
 			return err
 		}
@@ -248,8 +249,29 @@ func ClearUnstartedInstallation(profile string, id uuid.UUID) error {
 	return os.Remove(filepath.Join(profile, installRecord))
 }
 
-// The Apple login surface accepts physical keys from the guest's initial US
-// layout. Check this before downloading media or creating the local account.
-func ValidMacOSInstallPassword(value string) bool {
-	return len(value) >= 8 && len(value) <= 256 && strings.IndexFunc(value, func(r rune) bool { return r < ' ' || r > '~' }) < 0
+// publishBinding creates the named profile file once and never replaces a
+// different existing one.
+func publishBinding(profile, name string, data []byte) error {
+	temp, err := os.CreateTemp(profile, ".guest-binding-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(temp.Name())
+	_, writeErr := temp.Write(data)
+	if err := errors.Join(writeErr, temp.Close()); err != nil {
+		return err
+	}
+	path := filepath.Join(profile, name)
+	if err := os.Link(temp.Name(), path); !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(data)) {
+		return fmt.Errorf("unexpected existing %s", name)
+	}
+	prior, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(data, prior) {
+		return fmt.Errorf("refusing to replace existing %s", name)
+	}
+	return nil
 }

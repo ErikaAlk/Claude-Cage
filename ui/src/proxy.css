@@ -160,6 +160,11 @@
   border-radius: 10px;
   overflow: hidden;
 }
+.initialization .proxy-node-list {
+  max-height: min(24rem, 50dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .proxy-node {
   display: flex;
   align-items: center;
@@ -712,4 +717,14 @@
   .proxy-route-actions .primary {
     transition: none;
   }
+}
+.proxy-node-edit {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.proxy-node-edit > button {
+  justify-self: start;
 }

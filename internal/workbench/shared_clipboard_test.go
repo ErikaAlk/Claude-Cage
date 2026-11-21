@@ -21,7 +21,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/clipboardfiles"
-	"github.com/sylvinus/agent-vm/internal/guestos"
 )
 
 func TestLinuxClipboardCommandFitsWindowsProcessLimit(t *testing.T) {
@@ -61,6 +60,50 @@ func TestLinuxClipboardCommandFitsWindowsProcessLimit(t *testing.T) {
 	}
 }
 
+func TestDesktopClipboardCommandIsScopedAndValidatesID(t *testing.T) {
+	s := testServer(t)
+	id := strings.Repeat("a", 24)
+	cmd, _, err := s.clipboardCommand(t.Context(), "stream", clipboardFileSelection{DesktopID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(cmd.Args[len(cmd.Args)-1], " --desktop "+id) {
+		t.Fatal("desktop clipboard did not select the requested instance")
+	}
+	for _, invalid := range []string{"default", "../other", id + ";echo bad"} {
+		if _, _, err := s.clipboardCommand(t.Context(), "stream", clipboardFileSelection{DesktopID: invalid}); err == nil {
+			t.Fatalf("accepted invalid instance %q", invalid)
+		}
+	}
+}
+
+func TestClipboardSlotHandoffAcrossDesktopTargets(t *testing.T) {
+	s := testServer(t)
+	s.ready = true
+	ctx1, _, release1, ok := s.acquireClipboardSlot(t.Context(), "")
+	if !ok {
+		t.Fatal("expected initial default clipboard slot")
+	}
+	// Duplicate connection for the same target is rejected with conflict.
+	if _, _, _, dup := s.acquireClipboardSlot(t.Context(), ""); dup {
+		t.Fatal("duplicate default clipboard slot should be rejected")
+	}
+	// Switching to an account Desktop supersedes the outgoing default slot.
+	id := strings.Repeat("a", 24)
+	go func() {
+		<-ctx1.Done()
+		release1()
+	}()
+	ctx2, _, release2, ok := s.acquireClipboardSlot(t.Context(), id)
+	if !ok {
+		t.Fatal("expected account desktop clipboard slot to supersede default slot")
+	}
+	defer release2()
+	if ctx2.Err() != nil {
+		t.Fatalf("new slot context cancelled unexpectedly: %v", ctx2.Err())
+	}
+}
+
 func TestClipboardFileReleaseWaitsForArchiveReader(t *testing.T) {
 	s := testServer(t)
 	var released [][]string
@@ -90,25 +133,6 @@ func TestClipboardFileReleaseSupportsLegacyAgents(t *testing.T) {
 	s.releaseClipboardFiles(id)
 	if len(s.clipboardFileSelection(id).Paths) != 0 {
 		t.Fatal("legacy selection reference remained")
-	}
-}
-
-func TestClipboardCopyRejectsMissingRevisionAndInvalidPhaseBeforeGuestAccess(t *testing.T) {
-	s := testServer(t)
-	s.macosGuest = &guestos.MacOSProfile{Instance: "mac", User: "guestdev"}
-	for _, body := range []string{
-		`{"phase":"unknown"}`,
-		`{"phase":"read","session":"gui-a"}`,
-		`{"phase":"read","session":"gui-a","revision":-1}`,
-		`{"phase":"read","session":"","revision":1}`,
-	} {
-		response := httptest.NewRecorder()
-		request := httptest.NewRequest(http.MethodPost, "/api/clipboard/copy", strings.NewReader(body))
-		request.Header.Set("Content-Type", "application/json")
-		s.clipboardCopy(response, request)
-		if response.Code != http.StatusBadRequest {
-			t.Fatalf("invalid copy request reached the guest: %d", response.Code)
-		}
 	}
 }
 

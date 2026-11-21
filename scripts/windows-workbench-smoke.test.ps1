@@ -7,6 +7,7 @@ function Assert-SmokeContract([bool]$Condition, [string]$Message) { if (-not $Co
 try {
     $env:RUNNER_TEMP = Join-Path $directory 'runner-temp'
     Assert-SmokeContract ((Get-WindowsWorkbenchTestBase) -eq [IO.Path]::GetFullPath($env:RUNNER_TEMP)) 'CI report directory ignores RUNNER_TEMP.'
+    Assert-SmokeContract ((Get-WindowsWorkbenchTestBase -WorkbenchProfile) -eq [IO.Path]::GetFullPath($env:RUNNER_TEMP)) 'CI workbench profile ignores RUNNER_TEMP.'
     $savedTemp = $env:TEMP; $savedTmp = $env:TMP
     $envFile = Join-Path $directory 'child-env.json'
     $envScript = Join-Path $directory 'child-env.ps1'
@@ -25,8 +26,31 @@ try {
     Assert-SmokeContract (-not (Test-Path -LiteralPath $childEnv.temp)) 'Owned test temp was not cleaned.'
     Remove-Item Env:RUNNER_TEMP -ErrorAction SilentlyContinue
     Assert-SmokeContract ((Get-WindowsWorkbenchTestBase) -eq [IO.Path]::GetTempPath()) 'Local report directory lost its OS temp fallback.'
+    $checkout = Split-Path $PSScriptRoot -Parent
+    Push-Location $directory
+    try {
+        Assert-SmokeContract ((Get-WindowsWorkbenchTestBase -WorkbenchProfile) -eq (Join-Path $checkout '_output/workbench-smoke')) 'Local workbench profile must stay in the checkout output directory.'
+    } finally { Pop-Location }
+    if ($IsWindows -and $env:LOCALAPPDATA) {
+        # An AppData checkout recreates the old timeout even with the new
+        # checkout-relative default. No files need to be written there.
+        $privateStage = Join-Path $env:LOCALAPPDATA 'Cage-test-checkout/_output/workbench-smoke'
+        $rejected = $false
+        try { Assert-WindowsWorkbenchTestBase $privateStage }
+        catch { $rejected = $_.Exception.Message -match 'Set RUNNER_TEMP' }
+        Assert-SmokeContract $rejected 'Smoke preflight accepted a checkout under AppData.'
+    }
     $report = Join-Path $directory 'smoke.json'
     $fixture = Join-Path $directory 'fixture.json'
+    $profile = Join-Path $directory 'profile'
+    $storageError = '此目录包含或属于凭据、用户资料或版本控制数据，无法共享'
+    $controllerLogs = Join-Path $profile 'logs'
+    New-Item -ItemType Directory -Path $controllerLogs -Force | Out-Null
+    @(
+        '{unfinished'
+        '{"level":"error","source":"command","message":"unrelated-private-controller-message"}'
+        (@{ level = 'error'; source = 'command'; message = $storageError } | ConvertTo-Json -Compress)
+    ) | Set-Content -LiteralPath (Join-Path $controllerLogs 'events.jsonl')
     $childScript = Join-Path $directory 'child.ps1'
     [IO.File]::WriteAllText($childScript, '[IO.File]::Copy($args[0],$args[1],$true); exit 17')
     @{
@@ -49,18 +73,36 @@ try {
         Assert-SmokeContract ($child.ExitCode -eq 17) 'Failure fixture did not exit unsuccessfully.'
         $failed = $false
         $captured = & {
-            try { Assert-WindowsWorkbenchReport -ExitCode $child.ExitCode -Report $report }
+            try { Assert-WindowsWorkbenchReport -ExitCode $child.ExitCode -Report $report -ControllerProfile $profile }
             catch { $script:observedFailure = $_.Exception.Message; Write-Output ('Rejected smoke: ' + $_.Exception.Message) }
         } 6>&1
         $text = ($captured | ForEach-Object { $_.ToString() }) -join "`n"
         Assert-SmokeContract ($observedFailure -like '*loading_workbench*') 'Failure report was not parsed before rejecting its process exit.'
-        foreach ($expected in @('loading_workbench', 'module-load', '/missing.js', 'syntax error', '"prepareExit":1', '"prepareStatus":"stop_required"', 'shutdown failed http://localhost:1234/api/handoff')) {
+        foreach ($expected in @('loading_workbench', 'module-load', '/missing.js', 'syntax error', '"prepareExit":1', '"prepareStatus":"stop_required"', 'shutdown failed http://localhost:1234/api/handoff', ('"controllerError":"' + $storageError + '"'))) {
             Assert-SmokeContract ($text.Contains($expected)) "Missing safe smoke evidence: $expected"
         }
-        foreach ($private in @('private-token','private-fragment','private-query','private-entry','private-launch','private-page-body')) {
+        foreach ($private in @('private-token','private-fragment','private-query','private-entry','private-launch','private-page-body','unrelated-private-controller-message')) {
             Assert-SmokeContract (-not $text.Contains($private)) "Private smoke field leaked: $private"
         }
     } finally { $child.Dispose() }
+    $unusableReport = Join-Path $directory 'unusable.json'
+    $unusableReports = [ordered]@{
+        'No smoke report' = $null
+        'Invalid smoke report' = '{"unrelated-private-controller-message":'
+        'exceeds the bounded diagnostic size' = ('x' * 65537)
+    }
+    foreach ($reason in $unusableReports.Keys) {
+        if ($null -ne $unusableReports[$reason]) { [IO.File]::WriteAllText($unusableReport, $unusableReports[$reason]) }
+        $failure = ''
+        try { Assert-WindowsWorkbenchReport -ExitCode 17 -Report $unusableReport -ControllerProfile $profile }
+        catch { $failure = $_.Exception.Message }
+        Assert-SmokeContract ($failure.Contains($reason) -and $failure.Contains($storageError)) "Missing backend evidence for $reason."
+        Assert-SmokeContract (-not $failure.Contains('unrelated-private-controller-message')) 'Unsafe controller or report content leaked.'
+    }
+    $timeoutFailure = ''
+    try { Stop-WindowsWorkbenchAcceptance 'Cage workbench acceptance timed out.' $profile }
+    catch { $timeoutFailure = $_.Exception.Message }
+    Assert-SmokeContract ($timeoutFailure.Contains('timed out') -and $timeoutFailure.Contains($storageError)) 'Missing backend evidence on timeout.'
     [IO.File]::WriteAllText($report, '{"success":true,"nativeBridgeReady":true}')
     Assert-WindowsWorkbenchReport -ExitCode 0 -Report $report
     $rejected = $false

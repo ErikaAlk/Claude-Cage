@@ -97,7 +97,7 @@ function Test-InstallerTransaction {
     & (Get-Command makensis.exe -ErrorAction Stop).Source /V2 /INPUTCHARSET UTF8 "/DAPP_DIR=$app" "/DVERSION=$version" "/DVERSION_NUMERIC=$(($version -split '-')[0]).0" "/DFILE_MANIFEST=$app\Cage.install-files.json" "/DOUTPUT_FILE=$setup" (Join-Path $PSScriptRoot '../packaging/windows/Cage.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'The production NSIS fixture did not compile.' }
     function Run-Fixture([string]$Executable, [string[]]$Arguments) {
-        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru
+        $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -WorkingDirectory $scenario -PassThru
         try {
             if (!$process.WaitForExit(30000)) { $process.Kill($true); $process.WaitForExit(); throw 'The owned NSIS fixture exceeded 30 seconds.' }
             if ($process.ExitCode -ne 0) {
@@ -110,7 +110,13 @@ function Test-InstallerTransaction {
     }
     try {
         [IO.Directory]::CreateDirectory($target) | Out-Null
-        Run-Fixture $setup @('/S','/DESKTOPSHORTCUT=0','/STARTMENUSHORTCUT=0',"/DIAGNOSTICS=`"$report`"","/D=$target")
+        # Hold the pre-created empty target as another process's working directory
+        # so RMDir leaves it in place and NSIS must attach into it (#652).
+        $savedDirectory = [Environment]::CurrentDirectory
+        try {
+            [Environment]::CurrentDirectory = $target
+            Run-Fixture $setup @('/S','/DESKTOPSHORTCUT=0','/STARTMENUSHORTCUT=0',"/DIAGNOSTICS=`"$report`"","/D=$target")
+        } finally { [Environment]::CurrentDirectory = $savedDirectory }
         Check ((Get-Content (Join-Path $target 'program.txt') -Raw) -eq 'fixture') 'NSIS did not publish its text payload.'
         Check (!(Test-Path -LiteralPath ($target + '.cage-installation.json'))) 'NSIS left the first-install receipt unfinished.'
         Check ((Get-ItemProperty $key).InstallLocation -eq $target) 'NSIS registered a different fixture target.'
@@ -148,6 +154,75 @@ try {
     Invoke-Helper @('-Operation','complete','-Target',$old,'-Receipt',$receipt) -WithoutFileHash
     Check (!(Test-Path -LiteralPath $receipt)) 'First install did not finish its transaction.'
 
+    # A first install into a kept empty folder (e.g. held as another process's CWD)
+    # attaches staged entries directly into it without renaming over the folder.
+    $scenario = Join-Path $root 'first-install-kept-empty-dir'
+    $old = Join-Path $scenario 'empty-destination'; $stage = Join-Path $scenario 'staged'; $receipt = Join-Path $scenario 'receipt.json'
+    [IO.Directory]::CreateDirectory($old) | Out-Null
+    App $stage 'fresh-attached'
+    Invoke-Helper @('-Operation','prepare','-Source',$old,'-Target',$stage,'-Receipt',$receipt)
+    Invoke-Helper @('-Operation','attach','-Source',$stage,'-Target',$old)
+    Check (!(Test-Path -LiteralPath $stage)) 'First-install attach left the staged folder behind.'
+    Invoke-Helper @('-Operation','complete','-Target',$old,'-Receipt',$receipt) -WithoutFileHash
+    Check ((Get-Content (Join-Path $old 'program.txt') -Raw) -eq 'fresh-attached') 'First-install attach did not publish the application.'
+    Check (!(Test-Path -LiteralPath $receipt)) 'First-install attach did not finish its transaction.'
+
+    # Abandoning a failed first install removes the receipt only when neither
+    # the recorded installPath nor the target holds any existing files or links.
+    $scenario = Join-Path $root 'abandon-first-install'
+    $missing = Join-Path $scenario 'missing'; $stage = Join-Path $scenario 'staged-missing'; $receipt = Join-Path $scenario 'missing.json'
+    App $stage 'fresh'
+    Invoke-Helper @('-Operation','prepare','-Source',$missing,'-Target',$stage,'-Receipt',$receipt)
+    Invoke-Helper @('-Operation','abandon','-Target',$missing,'-Receipt',$receipt) -WithoutFileHash
+    Check (!(Test-Path -LiteralPath $receipt)) 'Abandon left a receipt when the target did not exist.'
+
+    $emptyTarget = Join-Path $scenario 'empty-dir'; $stage = Join-Path $scenario 'staged-empty'; $receipt = Join-Path $scenario 'empty.json'
+    [IO.Directory]::CreateDirectory($emptyTarget) | Out-Null
+    App $stage 'fresh'
+    Invoke-Helper @('-Operation','prepare','-Source',$emptyTarget,'-Target',$stage,'-Receipt',$receipt)
+    Invoke-Helper @('-Operation','abandon','-Target',$emptyTarget,'-Receipt',$receipt) -WithoutFileHash
+    Check (!(Test-Path -LiteralPath $receipt)) 'Abandon left a receipt for an empty pre-created install directory.'
+    Check (Test-Path -LiteralPath $emptyTarget -PathType Container) 'Abandon deleted the pre-created empty directory.'
+
+    $nonEmpty = Join-Path $scenario 'non-empty'; $stage = Join-Path $scenario 'staged-nonempty'; $receipt = Join-Path $scenario 'nonempty.json'
+    [IO.Directory]::CreateDirectory($nonEmpty) | Out-Null
+    App $stage 'fresh'
+    Invoke-Helper @('-Operation','prepare','-Source',$nonEmpty,'-Target',$stage,'-Receipt',$receipt)
+    Write-File (Join-Path $nonEmpty '.keep') 'user data'
+    Invoke-Helper @('-Operation','abandon','-Target',$nonEmpty,'-Receipt',$receipt) 1
+    Check (Test-Path -LiteralPath $receipt) 'Abandon deleted a receipt when the target directory was non-empty.'
+    Check ((Get-Content (Join-Path $nonEmpty '.keep') -Raw) -eq 'user data') 'Abandon changed a file in the target directory.'
+
+    $fileTarget = Join-Path $scenario 'regular-file'; $stage = Join-Path $scenario 'staged-file'; $receipt = Join-Path $scenario 'file.json'
+    App $stage 'fresh'
+    Invoke-Helper @('-Operation','prepare','-Source',$fileTarget,'-Target',$stage,'-Receipt',$receipt)
+    Write-File $fileTarget 'existing regular file'
+    Invoke-Helper @('-Operation','abandon','-Target',$fileTarget,'-Receipt',$receipt) 1
+    Check (Test-Path -LiteralPath $receipt) 'Abandon deleted a receipt when the target path was a regular file.'
+    Check ((Get-Content $fileTarget -Raw) -eq 'existing regular file') 'Abandon modified an existing regular file.'
+
+    $otherInstall = Join-Path $scenario 'other-install'; $otherEmpty = Join-Path $scenario 'other-empty'; $stage = Join-Path $scenario 'staged-other'; $receipt = Join-Path $scenario 'other.json'
+    [IO.Directory]::CreateDirectory($otherInstall) | Out-Null
+    [IO.Directory]::CreateDirectory($otherEmpty) | Out-Null
+    App $stage 'fresh'
+    Invoke-Helper @('-Operation','prepare','-Source',$otherInstall,'-Target',$stage,'-Receipt',$receipt)
+    Write-File (Join-Path $otherInstall 'note.txt') 'user note'
+    Invoke-Helper @('-Operation','abandon','-Target',$otherEmpty,'-Receipt',$receipt) 1
+    Check (Test-Path -LiteralPath $receipt) 'Abandon deleted a receipt when installPath still held files.'
+
+    $linkTarget = Join-Path $scenario 'link-real-empty'; $linkInstall = Join-Path $scenario 'link-install'; $stage = Join-Path $scenario 'staged-link'; $receipt = Join-Path $scenario 'link.json'
+    [IO.Directory]::CreateDirectory($linkTarget) | Out-Null
+    App $stage 'fresh'
+    Invoke-Helper @('-Operation','prepare','-Source',$linkInstall,'-Target',$stage,'-Receipt',$receipt)
+    if ($windows) {
+        & cmd.exe /c mklink /J $linkInstall $linkTarget | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not create the abandon link fixture.' }
+    } else { [IO.Directory]::CreateSymbolicLink($linkInstall, $linkTarget) | Out-Null }
+    Invoke-Helper @('-Operation','abandon','-Target',$otherEmpty,'-Receipt',$receipt) 1
+    Check (Test-Path -LiteralPath $receipt) 'Abandon deleted a receipt when installPath was a link.'
+
+    $scenario = Join-Path $root 'first-install'
+    $old = Join-Path $scenario 'empty-destination'; $receipt = Join-Path $scenario 'receipt.json'
     $diagnostic = Join-Path $scenario 'diagnostic.json'
     Write-File (Join-Path $old 'Cage.install-files.json') 'invalid-private-manifest'
     Invoke-Helper @('-Operation','prepare','-Target',$old,'-Receipt',$receipt,'-Diagnostics',$diagnostic) 1

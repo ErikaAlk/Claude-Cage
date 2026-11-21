@@ -67,6 +67,8 @@ cage_engine="$HOME/.claude-cage/container-engine/tools/docker"
 
 先从同一份源码构建 Linux Cage 后端：`make cage GOOS=linux GOARCH=amd64 CGO_ENABLED=0`。构建会生成工作台资产及 `_output/bin/cage`；不运行发布或版本修改流程。
 
+Linux ARM64（aarch64）服务器可在本机原生构建：后端改用 `GOARCH=arm64`，并自备 rootless Docker 与 ARM64 的 Mihomo，`build-guest.sh` 接受 `aarch64`，基础镜像为同一固定 digest 的多平台清单。项目 CI 与桌面端一键部署只覆盖 amd64；ARM64 构建由社区实测（[#449](https://github.com/Lee-xeo/Claude-Cage/issues/449)），未纳入官方验证，产物不得与 amd64 的发行文件混用。
+
 通过 `Dockerfile.guest` 构建基础层，再创建独立的镜像构建容器。构建容器不挂载项目、个人主目录、代理配置或账户；安装下载使用单独的构建网络。默认 Debian 镜像已经固定 digest，APT 继续验证发行版签名。若部署网络需要镜像站，只调整构建阶段的 Debian 软件源，保留签名验证；基础层和完整镜像提交前均恢复 `deb.debian.org` 官方源，以符合运行环境的维护下载来源限制。
 
 基础层在批量安装前使用共同的 `internal/cage/apt-bootstrap.sh` 检查 APT；Debian 13 低于 3.0.4 时先通过官方安全源升级，升级下载禁用重试。`build-guest.sh` 将该脚本与 Dockerfile 复制到本次构建的临时上下文，部署工具包包含同一份脚本。升级失败会保留构建证据并停止后续安装。
@@ -89,7 +91,7 @@ _output/bin/cage container-install-script services |
   "$cage_engine" exec --interactive --user cage --workdir /home/cage "$CAGE_BUILD_CONTAINER" zsh -l
 ```
 
-第一步仅选择 Python、Node、Chromium、Claude Code 和 code-server，复用 `ToolInstallPrelude` 与 `agent-vm.setup.sh`；第二步复用 `GuestSetup`。服务安装需要容器内 systemd 正在运行，不能把第二步直接塞进普通 `Dockerfile RUN`。容器模式跳过 zram；Chromium 沙箱保持开启。基础层将容器内 systemd 的 `DefaultTasksMax` 设为 `infinity`，单个服务不再受默认百分比派生的小限额约束。运行工作环境由宿主父 slice 实施 1024 个进程／线程的硬上限；独立镜像构建仍使用 2 CPU、4 GiB 内存、512 个进程／线程的预算。初始化浏览器资料的 `StartScript` 留到工作环境首次启动，不能在基础镜像内预建浏览器密码或控制凭据。
+第一步仅选择 Python、Node、Chromium、Claude Code 和 code-server，复用 `ToolInstallPrelude` 与 `agent-vm.setup.sh`；第二步复用 `GuestSetup`。服务安装需要容器内 systemd 正在运行，不能把第二步直接塞进普通 `Dockerfile RUN`。容器模式跳过 zram；Chromium 沙箱保持开启。基础层将容器内 systemd 的 `DefaultTasksMax` 设为 `infinity`，单个服务不再受默认百分比派生的小限额约束。运行工作环境由宿主父 slice 实施 16384 个进程／线程的硬上限；容器创建时把同一数值和配置中的 CPU、内存写入容器 scope，已有容器在启动前把这三项更新到当前数值，更新失败时拒绝启动；独立镜像构建仍使用 2 CPU、4 GiB 内存、512 个进程／线程的预算。初始化浏览器资料的 `StartScript` 留到工作环境首次启动，不能在基础镜像内预建浏览器密码或控制凭据。
 
 在 rootless Docker 中，systemd 的启动入口为：
 
@@ -99,7 +101,7 @@ mount -t cgroup2 none /sys/fs/cgroup
 exec /sbin/init
 ```
 
-这些命令只能在已经配置为私有用户、PID、IPC、网络和 cgroup 命名空间的容器中执行。容器采用 `/run`、`/tmp` 临时文件系统，只额外提供 `/dev/fuse`、`/dev/net/tun` 以及用户命名空间内的 `SYS_ADMIN`、`NET_ADMIN`。工作环境由 Cage 创建，使用 `network=none` 和专门的宿主父 slice 限额；镜像构建容器的联网与生命周期由构建步骤单独管理。引擎将容器主机名固定为 `cage`，并添加 `cage:127.0.1.1` 别名，保证无默认网络时也能解析自身主机名。容器可管理自己的 cgroup 子层，CPU、内存和 PID 硬上限须放在它看不到的宿主父层。
+这些命令只能在已经配置为私有用户、PID、IPC、网络和 cgroup 命名空间的容器中执行。容器采用 `/run`、`/tmp` 临时文件系统，只额外提供 `/dev/fuse`、`/dev/net/tun` 以及用户命名空间内的 `SYS_ADMIN`、`NET_ADMIN`。工作环境由 Cage 创建，使用 `network=none` 和专门的宿主父 slice 限额；镜像构建容器的联网与生命周期由构建步骤单独管理。引擎将容器主机名固定为 `cage`，并添加 `cage:127.0.1.1` 别名，保证无默认网络时也能解析自身主机名。容器可管理自己的 cgroup 子层，CPU、内存和 PID 硬上限须放在它看不到的宿主父层。启动核对同时读取父 slice 和容器 scope：容器 scope 是客机 cgroup 命名空间的根，宿主以 `nsdelegate` 挂载 cgroup2 时，内核拒绝从命名空间内部写入根上的文件（`/sys/kernel/cgroup/delegate` 列出的除外，其中不含 `memory.max`、`cpu.max`、`pids.max`），所以客机改不了这一层，读数可信；核对这一层是为了发现创建时的旧值把实际上限压在父层之下，硬上限仍由父层承担。
 
 提交完整镜像前，仅清理本次新建构建容器：停止 SSH 和 Cage 服务，移除生成的 SSH host keys、`cage_authorized_keys`、journal、APT 缓存和临时下载，将 `/etc/machine-id` 清空。确认其中没有账户文件、浏览器控制凭据、浏览器密码、Claude 登录态、代理凭据或用户项目，再停止并提交镜像，记录 SHA-256 image ID。不得对已有工作环境执行这一清理；已有容器的整个可写文件系统都属于持久数据。
 

@@ -19,6 +19,23 @@ export function orderedTabs(tabs, saved) {
   });
 }
 
+export function moveItem(items, from, to, after) {
+  const source = items.indexOf(from);
+  const target = items.indexOf(to);
+  if (source < 0 || target < 0 || source === target) return items;
+  const position = target - Number(source < target) + Number(after);
+  if (position === source) return items;
+  const order = [...items];
+  order.splice(source, 1);
+  order.splice(position, 0, from);
+  return order;
+}
+
+export function dropAfter(row, clientY) {
+  const { top, height } = row.getBoundingClientRect();
+  return clientY > top + height / 2;
+}
+
 const clientMount = /^\/run\/cage-client-projects\/[0-9a-f]{32}$/;
 const folderName = (path) => path?.split(/[\\/]/).filter(Boolean).at(-1);
 
@@ -32,14 +49,14 @@ export function projectGroups(status) {
   return status?.project_groups || (status?.projects || []).map(path => ({ workspace: path, name: projectName(path), folders: [path] }));
 }
 
-export function projectName(path, groups = []) {
+export function projectName(path, groups = [], fallback = "新项目") {
   if (clientMount.test(path)) {
     try { return sessionStorage.getItem(path) || "本机共享项目"; }
     catch { return "本机共享项目"; }
   }
   const group = groups.find(item => item.workspace === path || item.folders.includes(path));
   if (group?.name) return group.name;
-  return folderName(path) || "新项目";
+  return folderName(path) || fallback;
 }
 
 export function tabName(tab, saved, project) {
@@ -70,4 +87,80 @@ export function splitTab(layout, tabs, id, side) {
   const other = [opposite, layout.other, layout.active, ...tabs.map(tab => tab.id)]
     .find(candidate => candidate !== id && tabs.some(tab => tab.id === candidate));
   return other ? { active: id, other, side } : layout;
+}
+
+export function sameState(a, b) {
+  if (Object.is(a, b)) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameState(a[i], b[i])) return false;
+    return true;
+  }
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(b, key) || !sameState(a[key], b[key])) return false;
+  }
+  return true;
+}
+
+export function mergeTabs(previous, incoming) {
+  const map = new Map(incoming.map((item) => [item.id, item]));
+  const seen = new Set();
+  const next = [];
+  let changed = false;
+  for (const item of previous) {
+    const updated = map.get(item.id);
+    if (!updated) {
+      changed = true;
+      continue;
+    }
+    seen.add(item.id);
+    if (sameState(item, updated)) next.push(item);
+    else {
+      changed = true;
+      next.push(updated);
+    }
+  }
+  for (const item of incoming) {
+    if (!seen.has(item.id)) {
+      changed = true;
+      next.push(item);
+    }
+  }
+  return changed ? next : previous;
+}
+
+export function mergeBrowserTabs(previous, browserTabs) {
+  const map = new Map(browserTabs.map((item) => [item.id, item]));
+  const seen = new Set();
+  const next = [];
+  let changed = false;
+  for (const item of previous) {
+    if (item.kind === "terminal") {
+      seen.add(item.id);
+      next.push(item);
+      continue;
+    }
+    const updated = map.get(item.id);
+    if (!updated) {
+      changed = true;
+      continue;
+    }
+    seen.add(item.id);
+    if (sameState(item, updated)) next.push(item);
+    else {
+      changed = true;
+      next.push(updated);
+    }
+  }
+  for (const item of browserTabs) {
+    if (!seen.has(item.id)) {
+      changed = true;
+      next.push(item);
+    }
+  }
+  return changed ? next : previous;
 }
