@@ -9,6 +9,43 @@ import (
 	"testing"
 )
 
+func TestTailnetRefreshAcrossUpgradeAndUninstall(t *testing.T) {
+	if os.PathSeparator != '/' {
+		t.Skip("guest installation executes on Unix")
+	}
+	s := &Server{profile: t.TempDir()}
+	dir := t.TempDir()
+	probe := func(update, want bool) {
+		t.Helper()
+		script := strings.ReplaceAll(s.tailnetRefreshProbe(update), "/usr/local/bin", dir)
+		output, err := exec.Command("/bin/sh", "-c", script).Output()
+		if err != nil || (string(output) == "installed") != want {
+			t.Fatalf("update=%t: output=%q err=%v, want refresh=%t", update, output, err, want)
+		}
+	}
+	probe(false, false)
+	probe(true, false)
+	former := filepath.Join(dir, filepath.Base(tailnetFormerProgram))
+	if err := os.Symlink("/bin/true", former); err != nil {
+		t.Fatal(err)
+	}
+	probe(false, true)
+	probe(true, true)
+	if _, err := s.ensureTailnetPlugin(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(former, filepath.Join(dir, filepath.Base(tailnetProgram))); err != nil {
+		t.Fatal(err)
+	}
+	probe(false, false)
+	probe(true, true)
+	if err := s.removeHostPlugin(tailnetPlugin); err != nil {
+		t.Fatal(err)
+	}
+	probe(false, false)
+	probe(true, false)
+}
+
 func TestTailnetInstallAtomicallyReplacesRunningPayloadAndPreservesIdentity(t *testing.T) {
 	if os.PathSeparator != '/' {
 		t.Skip("guest installation executes on Unix")
@@ -64,6 +101,14 @@ func TestTailnetInstallAtomicallyReplacesRunningPayloadAndPreservesIdentity(t *t
 	}
 	if data, err := os.ReadFile(identity); err != nil || string(data) != "saved-node-and-keys" {
 		t.Fatal("installation touched identity", err)
+	}
+	if _, err := os.Stat(former); err != nil {
+		t.Fatal("lost migration retry signal before plugin registration", err)
+	}
+	finish := exec.Command("/bin/bash", "-c", strings.NewReplacer("/usr/local/bin", bin, "/etc/sudoers.d", sudoers).Replace(tailnetFinishMigration))
+	finish.Env = install.Env
+	if out, err := finish.CombinedOutput(); err != nil {
+		t.Fatalf("finish migration: %v %s", err, out)
 	}
 	if _, err := os.Stat(former); !os.IsNotExist(err) {
 		t.Fatal("the program under its old name was left behind", err)

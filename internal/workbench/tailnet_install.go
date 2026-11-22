@@ -17,7 +17,9 @@ import (
 // The program was once installed under an older name; that copy and its sudo
 // rule go once the new one is in place, and the node writes its SSH settings
 // with its own path when it starts again.
-const tailnetInstallScript = `set -eu; tmp=$(mktemp /tmp/tailnet.XXXXXX); stage=; trap 'rm -f "$tmp"; if test -n "$stage"; then sudo rm -f "$stage"; fi' EXIT; cat > "$tmp"; stage=$(sudo mktemp /usr/local/bin/.tailnet.XXXXXX); sudo install -m 0755 "$tmp" "$stage"; sudo mv -f "$stage" ` + tailnetProgram + `; printf 'cage-browser ALL=(cage) NOPASSWD: ` + tailnetProgram + `\n' | sudo tee /etc/sudoers.d/tailnet >/dev/null; sudo chmod 0440 /etc/sudoers.d/tailnet; sudo rm -f ` + tailnetFormerProgram + ` /etc/sudoers.d/cage-tailnet`
+const tailnetInstallScript = `set -eu; stage=$(sudo mktemp /usr/local/bin/.tailnet.XXXXXX); trap 'sudo rm -f "$stage"' EXIT; sudo install -m 0755 /dev/stdin "$stage"; sudo mv -f "$stage" ` + tailnetProgram + `; printf 'cage-browser ALL=(cage) NOPASSWD: ` + tailnetProgram + `\n' | sudo tee /etc/sudoers.d/tailnet >/dev/null; sudo chmod 0440 /etc/sudoers.d/tailnet`
+
+const tailnetFinishMigration = "sudo rm -f " + tailnetFormerProgram + " /etc/sudoers.d/cage-tailnet"
 
 // tailnetProgram is where the program is installed in the environment.
 const tailnetProgram = "/usr/local/bin/tailnet"
@@ -26,10 +28,21 @@ const tailnetProgram = "/usr/local/bin/tailnet"
 // looked for, to bring such an installation up to date.
 const tailnetFormerProgram = "/usr/local/bin/cage-tailnet"
 
-func (s *Server) refreshInstalledTailnet() error {
+// A cold start can provision the guest without going through the component
+// update job. Both paths migrate the former executable. The current executable
+// survives a plugin uninstall, so only refresh it for a registered plugin.
+func (s *Server) tailnetRefreshProbe(componentUpdate bool) string {
+	condition := "test -x " + tailnetFormerProgram
+	if componentUpdate && s.tailnetPluginInstalled() {
+		condition += " || test -x " + tailnetProgram
+	}
+	return "if " + condition + "; then printf installed; fi"
+}
+
+func (s *Server) refreshInstalledTailnet(componentUpdate bool) error {
 	ctx, cancel := context.WithTimeout(s.operationContext(), 15*time.Second)
 	defer cancel()
-	installed, err := s.guest(ctx, "if test -x "+tailnetProgram+" || test -x "+tailnetFormerProgram+"; then printf installed; fi")
+	installed, err := s.guest(ctx, s.tailnetRefreshProbe(componentUpdate))
 	if err != nil {
 		return err
 	}
@@ -100,5 +113,7 @@ func (s *Server) installTailnet() error {
 	if _, err := s.ensureTailnetPlugin(); err != nil {
 		return errors.New("Tailscale 已安装，但未能登记为插件：" + err.Error())
 	}
-	return nil
+	// Keep the former executable as the retry signal until registration succeeds.
+	_, err = s.guest(ctx, tailnetFinishMigration)
+	return err
 }

@@ -198,7 +198,7 @@ func (s *Server) synchronizeEnvironment() error {
 	}
 	// Publish the new guest-only binary before runCage restarts its controller;
 	// otherwise updated JavaScript would keep talking to the old protocol.
-	if err := s.refreshInstalledTailnet(); err != nil {
+	if err := s.refreshInstalledTailnet(true); err != nil {
 		return err
 	}
 	s.mu.Lock()

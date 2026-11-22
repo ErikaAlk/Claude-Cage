@@ -205,6 +205,9 @@ func (s *Server) attach() error {
 			return err
 		}
 	}
+	if err := s.refreshInstalledTailnet(false); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	s.credentials = credentials
 	s.ready = true
