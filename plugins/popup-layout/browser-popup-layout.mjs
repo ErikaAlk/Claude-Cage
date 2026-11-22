@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
 
+process.stdin.on('end', () => process.exit(0));
+process.stdin.resume();
+
 // 原生界面端口只允许此服务的独立用户连接，由启动前的防火墙保护。
 const socket = new WebSocket('ws://127.0.0.1:19223/0');
 const pending = new Map();
@@ -104,5 +107,6 @@ socket.onopen = async () => {
   await call('CSS.enable');
   document = (await call('DOM.getDocument')).root;
   index(document);
+  process.stdout.write('ready\n');
   schedule();
 };

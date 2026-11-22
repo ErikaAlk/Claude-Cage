@@ -1,0 +1,10 @@
+[Unit]
+Description=Cage extension popup layout
+[Socket]
+ListenStream=/run/cage-popup-layout.sock
+SocketUser=cage
+SocketMode=0600
+Accept=yes
+MaxConnections=1
+[Install]
+WantedBy=sockets.target
