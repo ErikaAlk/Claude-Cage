@@ -1,0 +1,13 @@
+{
+  "name": "happiest",
+  "displayName": "Happiest",
+  "description": "允许已配对的 Happiest 连接器读取已授权项目的会话历史，并关闭选定的会话终端。",
+  "version": "1.0.0",
+  "engines": { "cage": ">=0.2.0" },
+  "kind": "guest",
+  "permissions": [],
+  "categories": ["developer"],
+  "contributes": {
+    "mcpServers": [{ "id": "sessions", "command": ["python3", "-I", "sessions.py"] }]
+  }
+}
