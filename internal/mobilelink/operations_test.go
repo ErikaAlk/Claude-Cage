@@ -1,6 +1,10 @@
 package mobilelink
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"math"
 	"net/url"
 	"strings"
 	"testing"
@@ -71,5 +75,47 @@ func TestArchivedSessionQuery(t *testing.T) {
 		if allowed("GET", u) {
 			t.Fatal("unexpected archive query", query)
 		}
+	}
+}
+
+func TestTranscriptReadQuery(t *testing.T) {
+	const path = "/api/mobile/cli/plugins/happiest/v1/sessions/12345678-1234-4321-aaaa-123456789abc/transcript"
+	closePath := strings.TrimSuffix(path, "transcript") + "close"
+	if !allowed("POST", &url.URL{Path: closePath}) || allowed("GET", &url.URL{Path: closePath}) || allowed("POST", &url.URL{Path: closePath, RawQuery: "extra=1"}) {
+		t.Fatal("关闭会话的请求边界错误")
+	}
+	for _, action := range []string{"transcript", "close"} {
+		old := &url.URL{Path: "/api/mobile/cli/sessions/12345678-1234-4321-aaaa-123456789abc/" + action}
+		if allowed("GET", old) || allowed("POST", old) {
+			t.Fatal("旧接口仍然可用", action)
+		}
+	}
+	for _, query := range []string{"", "offset=0&max_bytes=128", "stream=2&offset=100&source=200-" + strings.Repeat("a", 64)} {
+		u := &url.URL{Path: path, RawQuery: query}
+		if !allowed("GET", u) || allowed("POST", u) {
+			t.Errorf("transcript read refused: %s", query)
+		}
+	}
+	for _, query := range []string{"offset=-1", "offset=0&offset=1", "max_bytes=0", "path=secret", "cli_id=other", "config=other", "offset=%31", "source=invalid"} {
+		if allowed("GET", &url.URL{Path: path, RawQuery: query}) {
+			t.Errorf("invalid transcript query accepted: %s", query)
+		}
+	}
+}
+
+func TestTranscriptResponseFitsTransport(t *testing.T) {
+	maximum := int64(math.MaxInt64)
+	chunk := TranscriptChunk{ID: strings.Repeat("a", 36), CLIID: strings.Repeat("a", 36),
+		Content: base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{251, 239, 190}, int(TranscriptMaxBytes()/3))),
+		Offset:  maximum, NextOffset: maximum, TotalBytes: maximum, Stream: maximum, StreamCount: maximum, NextStream: &maximum,
+		Source: strings.Repeat("9", 19) + "-" + strings.Repeat("a", 64)}
+	encoded, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spaced := strings.ReplaceAll(strings.ReplaceAll(string(encoded), ",", ", "), ":", ": ")
+	spaced = strings.ReplaceAll(spaced, "+", `\u002B`)
+	if len(spaced)+len(`{"result": }`)+1 > maxResponse {
+		t.Fatal("transcript exceeded response budget")
 	}
 }

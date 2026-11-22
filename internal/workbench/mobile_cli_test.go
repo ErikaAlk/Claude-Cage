@@ -97,6 +97,111 @@ func TestMobileCLIAccountAndConnectionBoundaries(t *testing.T) {
 	}
 }
 
+func TestMobileTranscriptAuthorizationAndQueryBoundaries(t *testing.T) {
+	s, id, _ := metadataFixture(t)
+	path := "/api/mobile/cli/plugins/happiest/v1/sessions/" + id + "/transcript"
+	if result := request(s, "GET", path, "", "", false); result.Code != http.StatusUnauthorized {
+		t.Fatal("anonymous history access", result.Code)
+	}
+	if result := request(s, "GET", path, "", "", true); result.Code != http.StatusForbidden {
+		t.Fatal("普通工作台连接读取了插件历史", result.Code)
+	}
+	s.account.lock()
+	if result := request(s, "GET", path, "", "", true); result.Code != http.StatusLocked {
+		t.Fatal("locked history access", result.Code)
+	}
+}
+
+func TestMobileClosePreservesHistoryAndOtherRealTerminal(t *testing.T) {
+	s, id, project := metadataFixture(t)
+	t.Cleanup(s.terminals.close)
+	owned, err := s.terminals.start(terminalChildCommand("echo"), project, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := s.terminals.start(terminalChildCommand("echo"), project, "shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := owned.subscribe()
+	defer first.Close()
+	second := other.subscribe()
+	defer second.Close()
+	readTerminalUntil(t, first, "terminal-ready")
+	readTerminalUntil(t, second, "terminal-ready")
+	owned.mu.Lock()
+	owned.sharedID = id
+	owned.mu.Unlock()
+	record, err := s.mobileCLI.record(s.profile, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.TerminalID = owned.id
+	record.Resume = true
+	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(mobileRecordPath(s.profile, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(project, record.CLIID+".jsonl")
+	history := []byte("{\"type\":\"user\",\"message\":{\"content\":\"保留历史\"}}\n")
+	if err := os.WriteFile(historyPath, history, 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/mobile/cli/plugins/happiest/v1/sessions/" + id + "/close"
+	if result := request(s, "POST", path, s.origin, "{}", false); result.Code != http.StatusUnauthorized {
+		t.Fatal("anonymous terminal close", result.Code)
+	}
+	oldEpoch, _ := s.account.access()
+	s.account.lock()
+	s.account.setKey(make([]byte, 32))
+	stale := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
+	stale.SetPathValue("id", id)
+	stale.Header.Set("Content-Type", "application/json")
+	staleResponse := httptest.NewRecorder()
+	s.mobileCloseSession(staleResponse, stale.WithContext(context.WithValue(stale.Context(), accountEpochKey{}, oldEpoch)))
+	if staleResponse.Code != http.StatusLocked || !owned.ownsConversation() {
+		t.Fatal("expired unlock closed terminal", staleResponse.Code)
+	}
+	if result := request(s, "POST", path, s.origin, "{}", true); result.Code != http.StatusForbidden || !owned.ownsConversation() {
+		t.Fatal("普通工作台连接关闭了插件会话", result.Code)
+	}
+	epoch, _ := s.account.access()
+	admitted := httptest.NewRequest("POST", path, strings.NewReader("{}"))
+	admitted.SetPathValue("id", id)
+	admitted.Header.Set("Content-Type", "application/json")
+	result := httptest.NewRecorder()
+	s.mobileCloseSession(result, admitted.WithContext(context.WithValue(admitted.Context(), accountEpochKey{}, epoch)))
+	if result.Code != http.StatusServiceUnavailable {
+		t.Fatal("guest absence must prevent a successful stop receipt", result.Code)
+	}
+	select {
+	case <-owned.done:
+	default:
+		t.Fatal("close returned before real process exit")
+	}
+	if s.terminals.get(owned.id) != nil || !other.ownsConversation() {
+		t.Fatal("wrong terminal closed")
+	}
+	after, err := os.ReadFile(mobileRecordPath(s.profile, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("terminal closure changed durable session identity or archive state")
+	}
+	content, err := os.ReadFile(historyPath)
+	if err != nil || string(content) != string(history) {
+		t.Fatal("history changed", err)
+	}
+	if err := other.enqueueInput(context.Background(), terminalInputLine("still-running")); err != nil {
+		t.Fatal(err)
+	}
+	readTerminalUntil(t, second, "child:still-running")
+}
+
 func TestMobileCLILaunchScopeAndOldApproval(t *testing.T) {
 	for _, command := range []string{"claude --dangerously-skip-permissions", "ccs a;id", "ccs --yes", "bash -c anything", "claude | other"} {
 		if _, err := mobileLaunchArgs(command, claudeSelection{}); err == nil {

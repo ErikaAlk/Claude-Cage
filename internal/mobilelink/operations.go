@@ -22,7 +22,10 @@ const (
 	linkOrigin  = "https://cage-mobile.invalid"
 )
 
-var sessionPath = regexp.MustCompile(`^/api/mobile/cli/sessions/[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}(/messages|/media|/stop|/approval|/open|/metadata|/account|/delete|/archive|/restore|/purge)?$`)
+const sessionIDPattern = `[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}`
+
+var sessionPath = regexp.MustCompile(`^/api/mobile/cli/sessions/` + sessionIDPattern + `(/messages|/media|/stop|/approval|/open|/metadata|/account|/delete|/archive|/restore|/purge)?$`)
+var happiestSessionPath = regexp.MustCompile(`^/api/mobile/cli/plugins/happiest/v1/sessions/` + sessionIDPattern + `/(transcript|close)$`)
 
 var surfacePath = regexp.MustCompile(`^/api/mobile/(?:browser|desktop)/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/(frame|action|close)$`)
 
@@ -62,6 +65,12 @@ func allowed(method string, u *url.URL) bool {
 		}
 		_, ok := FrameAfter(u.RawQuery)
 		return ok && match[1] == "frame" && method == http.MethodGet && strings.HasPrefix(u.Path, "/api/mobile/browser/")
+	}
+	if action := happiestSessionPath.FindStringSubmatch(u.Path); action != nil {
+		if action[1] == "transcript" {
+			return transcriptAllowed(method, u)
+		}
+		return method == http.MethodPost && u.RawQuery == ""
 	}
 	match := sessionPath.FindStringSubmatch(u.Path)
 	if match == nil {

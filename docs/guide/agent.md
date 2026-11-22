@@ -300,6 +300,22 @@ JSON 请求通过私有文件或 `--input -` 传递；二进制请求使用文�
 
 request 返回的是实际业务响应；Agent 仍需检查错误字段、任务状态和可见副作用。接口清单中的集合路径可带相同查询参数。新功能没有命名快捷方式时，直接用 request；这种差异不限制用户或 Agent 的操作权限。
 
+### 读取 Claude Code 原始历史
+
+个人版 Cage 通过 Happiest 环境内插件提供 `GET /api/mobile/cli/plugins/happiest/v1/sessions/{id}/transcript`。将仓库中的 `plugins/happiest` 目录复制到 Cage 配置目录的 `plugins` 下，在插件页面重新加载。已配对的连接器可以在账户解锁后读取已授权项目的历史。停用或卸载插件会关闭这项能力。普通会话接口中的 `turns` 用于显示摘要。
+
+查询参数仅接受 `stream`、`offset`、`max_bytes`、`source`。`stream` 和 `offset` 默认为零；`max_bytes` 必须大于零，省略时使用现有 4 MiB 响应协议扣除 JSON 元数据、Windows 包装、Base64 和 Windows JSON 字符转义开销后的原始字节预算，超过该预算时使用协议允许的大小。客户端不能提交文件路径、账号配置或 Claude UUID。
+
+响应包含 `id`（Cage 会话编号）、`cli_id`（该次执行的真实 Claude UUID）、`content`（原始文件字节的 Base64）、`offset`、`next_offset`、`total_bytes`、`eof`、`source`、`stream`、`stream_count`（全部执行来源数量）。读取任意来源的第一页后，可直接选择 `stream_count - 1` 获取最新执行。分页可能截在 UTF-8 字符或 JSONL 行的中间，接收端应连续拼接字节，再通过成熟的 JSONL 读取器处理完整记录；尚未完成的尾行保留至下一次增量读取。原文件中的工具参数、工具结果、分支标记与压缩记录均保留原字节。
+
+继续当前来源时提交上次返回的 `source` 与 `next_offset`；非零 `offset` 必须带上 `source`。来源标识绑定账号配置、Claude UUID、真实文件身份和已观察大小，允许原文件继续追加；文件替换、分页间截断或已有来源消失时返回 `source_changed`，客户端应重新读取完整来源，不能把新旧字节拼接。此标识依据 Claude JSONL 的追加写入约定，不验证同一文件内的等长改写。
+
+账号切换后的历次执行按时间顺序分别占用一个 `stream`。当前来源读到末尾且还有下一执行时，响应额外包含 `next_stream`；读取它时从 `offset=0` 开始，不携带前一来源的标识。各来源保留自己的真实 UUID，接收端可按原始消息 UUID 处理继承历史中的重复记录。新会话尚未生成文件时返回实际 UUID、空内容和 `eof=true`；历史执行文件缺失时返回 `transcript_unavailable`。接口只读取原始历史，发送、停止、审批与继续操作仍通过现有会话接口执行。
+
+需要结束整个会话终端时，向 `POST /api/mobile/cli/plugins/happiest/v1/sessions/{id}/close` 提交空 JSON 对象。Cage 关闭该会话绑定的终端，插件在客机中核对执行状态。会话目录、归档状态、原始 JSONL 与 Claude UUID 继续保留。可通过 `open` 重新打开同一会话。
+
+`close` 会等待原终端结束，再通过客机的实际会话注册信息核实执行已经停止，并从原历史更新继续方式。只有核实成功才返回 `{"id":"会话编号","running":false,"active":false}`。客机不可连接、原执行仍在运行、终端绑定已变化或原历史无法读取时返回明确错误；终端可能已经关闭，重新读取状态后再处理。该操作不会通过同账号或同项目选择其他终端，也不会终止未绑定到该会话的 Claude Desktop 窗口。
+
 WebSocket 用 `cage agent socket /api/terminals/终端ID/stream`。输入输出为 NDJSON，输入每行是 `{"type":"text","data":"原协议JSON字符串"}` 或 `{"type":"binary","data":"base64"}`。输出先发送 `{"protocol":1,"status":"connected"}`，随后为相同的帧对象，结束时输出标准命令结果。握手使用同一账户、Origin 和连接代次，可承载终端输入、尺寸调整和画面等已有消息。Ctrl+C 结束本地查看，断开不停止原终端；会话凭据由 CLI 持有。
 
 ### 原生窗口与客户端偏好
