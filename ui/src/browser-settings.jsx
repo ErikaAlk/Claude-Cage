@@ -54,7 +54,7 @@ export function BrowserSettingsPage({ tab, tabs, currentHome, layout, onLayoutCh
             <label className="browser-setting-field">{tr("新标签页地址")}<input type="url" aria-label={tr("新标签页地址")} required maxLength={8192} value={home} disabled={saving || loading} spellCheck="false" autoComplete="off" onChange={event => { setHome(event.target.value); setSaved(false); }} /></label>
             <p>{tr("普通标签与无痕标签使用同一默认地址。保存后，新建网页立即生效。")}</p>
             <div className="browser-setting-actions"><button className="primary" disabled={saving || loading || home === savedHome}>{saving ? tr("正在保存…") : tr("保存地址")}</button>{saved && <span role="status">{tr("已保存")}</span>}</div>
-            {error && <p className="browser-settings-error" role="alert">{error}</p>}
+            {error && <p className="browser-settings-error" role="alert">{tr(error)}</p>}
           </form></>}
           {item.id === 'appearance' && <><p>{tr("调整网页与文件编辑器的标签栏。")}</p><div className="browser-setting-row"><div><h3>{tr("标签栏布局")}</h3><p>{tr("立即生效，保存在本机。")}</p></div><InlineSelect aria-label={tr("标签栏布局")} value={layout} onValueChange={onLayoutChange}><option value="horizontal">{tr("横排（顶部）")}</option><option value="vertical">{tr("竖排（左侧）")}</option></InlineSelect></div><p>{tr("浏览器设置页跟随 Cage 当前的字体与配色。")}</p></>}
           {item.id === 'privacy' && <><p>{tr("管理网站保存在当前浏览会话中的数据和访问权限。")}</p>

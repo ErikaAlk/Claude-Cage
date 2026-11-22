@@ -45,3 +45,23 @@ test("every text passed to tr() or translate() is translated in every language",
   }
   assert.deepEqual(missing, []);
 });
+
+test("Russian workbench localizes Tailscale, API failures and generated tab names", async () => {
+  const { tailnetText } = await import("./tailscale-text.mjs");
+  const { formatMessage } = await import("./message-catalog.mjs");
+  const { httpErrorMessage, connectionErrorMessage, nativeFailureMessage } = await import("./error-message.mjs");
+  const { tabName } = await import("./workspace-state.mjs");
+  const catalog = JSON.parse(read("./locales/ru.json"));
+  const localize = (source, ...values) => formatMessage(catalog[source] ?? source, ...values);
+
+  for (const source of Object.values(tailnetText)) {
+    assert.match(catalog[source] ?? "", /\p{Script=Cyrillic}/u, `missing Russian Tailscale message: ${source}`);
+  }
+  assert.equal(localize(tailnetText.copyDeviceAddress, "laptop"), "Скопировать адрес устройства laptop");
+  assert.equal(localize(tailnetText.onlineCount, 2), "В сети: 2");
+  assert.match(httpErrorMessage("/environment/device-reset", 409, "", "", "GET", localize), /Чтение состояния переноса.*HTTP 409/u);
+  assert.match(connectionErrorMessage("/client/notifications", "GET", localize), /Чтение настроек уведомлений.*Соединение с Cage прервалось/u);
+  assert.match(nativeFailureMessage("notificationStatus", "timeout", localize), /Проверка системных уведомлений/u);
+  assert.equal(tabName({ incognito: true, kind: "editor" }, {}, "demo", localize), "Инкогнито · Файл · demo");
+  assert.equal(tabName({ id: "custom", incognito: true }, { custom: { title: "我的项目" } }, undefined, localize), "Инкогнито · 我的项目");
+});

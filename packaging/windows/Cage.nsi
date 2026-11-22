@@ -457,6 +457,9 @@ Section "Cage" Main
   SetOutPath "$PLUGINSDIR"
   File /oname=installation-files.ps1 "installation-files.ps1"
   File /oname=verified-file-deletion.cs "verified-file-deletion.cs"
+  ; PowerShell 5.1 Add-Type must not resolve NSIS's native System.dll as a
+  ; managed compiler reference from the plugin working directory.
+  SetOutPath "$TEMP"
   DetailPrint "$(CageSetupDetail6)"
   !insertmacro InstallPhase "preparing_file_transaction"
   ; CageData is the default storage of a packaged Windows installation. It
@@ -468,12 +471,10 @@ Section "Cage" Main
   Call WriteInstallDiagnostic
   DetailPrint "$1"
   ${If} $0 != 0
-    SetOutPath "$TEMP"
     RMDir /r "$StageDir"
     SetErrorLevel 2
     Abort "$(CageSetupDetail7)"
   ${EndIf}
-  SetOutPath "$TEMP"
   ${If} $ExistingInstall == "1"
     !insertmacro InstallPhase "moving_previous_application"
     ; The installation folder itself stays; only its program and personal

@@ -2709,5 +2709,7 @@
   "删除账号「{0}」？": "Supprimer le compte « {0} » ?",
   "这是列表中的最后一个账号。删除后会从账号管理与调度中移除，新建 Claude 终端将沿用环境原有的登录。虚拟机内的会话历史和资料会保留。": "C'est le dernier compte de la liste. Après suppression, il sera retiré de la gestion et de la planification, et les nouveaux terminaux Claude utiliseront la connexion d'origine de l'environnement. L'historique des sessions et les données dans la machine virtuelle seront conservés.",
   "删除后会从账号管理、调度和 Desktop 列表中移除此账号。请先关闭该账号的终端与 Desktop；虚拟机内的会话历史和资料会保留。": "Après suppression, ce compte sera retiré de la gestion, de la planification et de la liste Desktop. Veuillez d'abord fermer les terminaux et le Desktop de ce compte ; l'historique des sessions et les données dans la machine virtuelle seront conservés.",
-  "删除后会从账号管理与调度中移除此账号。虚拟机内的会话历史和资料会保留。": "Après suppression, ce compte sera retiré de la gestion et de la planification. L'historique des sessions et les données dans la machine virtuelle seront conservés."
+  "删除后会从账号管理与调度中移除此账号。虚拟机内的会话历史和资料会保留。": "Après suppression, ce compte sera retiré de la gestion et de la planification. L'historique des sessions et les données dans la machine virtuelle seront conservés.",
+  "丢弃文件": "Supprimer le fichier",
+  "正在丢弃…": "Suppression…"
 }

@@ -456,6 +456,34 @@ try {
     $previousCopies = @(Get-ChildItem (Join-Path $old 'Cage-preserved-files') -File -Recurse)
     Check (@($previousCopies | Where-Object { (Get-Content $_.FullName -Raw) -eq 'before attempted update' }).Count -eq 1) 'Legacy recovery deleted the previous project version.'
     Check (@($previousCopies | Where-Object { (Get-Content $_.FullName -Raw) -eq 'old personal file' }).Count -eq 1) 'Legacy recovery deleted the previous personal-file version.'
+    if ($windows -and (& $HelperShell -NoProfile -Command '$PSVersionTable.PSEdition') -eq 'Desktop') {
+        # Windows PowerShell compiles the verified-deletion type with csc.exe
+        # below TEMP; no ANSI code page encodes this folder name (#690). Place
+        # the helper under the same non-ANSI TEMP like NSIS $PLUGINSDIR.
+        $scenario = Join-Path $root 'non-ansi-temp'
+        $stage = Join-Path $scenario 'installed'; $receipt = Join-Path $scenario 'receipt.json'
+        $temporary = Join-Path $scenario ('temp-' + [char]::ConvertFromUtf32(0x1F600))
+        $plugins = Join-Path $temporary 'plugins'
+        App $stage 'new'
+        [IO.Directory]::CreateDirectory($plugins) | Out-Null
+        Copy-Item -LiteralPath $helper -Destination (Join-Path $plugins 'installation-files.ps1')
+        Copy-Item -LiteralPath (Join-Path (Split-Path $helper -Parent) 'verified-file-deletion.cs') -Destination (Join-Path $plugins 'verified-file-deletion.cs')
+        $savedTemporary = $env:TMP, $env:TEMP
+        $savedDirectory = [Environment]::CurrentDirectory
+        $savedHelper = $helper
+        try {
+            $env:TMP = $env:TEMP = $temporary
+            [Environment]::CurrentDirectory = $temporary
+            $helper = Join-Path $plugins 'installation-files.ps1'
+            Invoke-Helper @('-Operation','prepare','-Target',$stage,'-Receipt',$receipt)
+            Invoke-Helper @('-Operation','complete','-Target',$stage,'-Receipt',$receipt)
+        } finally {
+            $helper = $savedHelper
+            [Environment]::CurrentDirectory = $savedDirectory
+            $env:TMP, $env:TEMP = $savedTemporary
+        }
+        Check (!(Test-Path -LiteralPath $receipt)) 'A temporary folder outside the ANSI code page kept the receipt.'
+    }
     if ($windows) {
         & $HelperShell -NoProfile -File (Join-Path $PSScriptRoot 'test-windows-verified-file-deletion.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'Verified-handle deletion regression failed.' }

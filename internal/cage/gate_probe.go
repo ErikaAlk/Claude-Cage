@@ -34,7 +34,7 @@ func ProbeExitIP(ctx context.Context, cfg Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return probeExitIP(ctx, e)
+	return probeExitIP(ctx, e, exitProbeReachabilityURL)
 }
 
 // exitProbeService is a fixed public IPv4 echo endpoint. Each one is reached
@@ -55,15 +55,22 @@ var exitProbeServices = []exitProbeService{
 	{id: "cftrace", name: "第三检测服务", endpoint: "https://1.1.1.1/cdn-cgi/trace", trace: true},
 }
 
+// exitProbeReachabilityURL is the fixed target of the node latency test. It is
+// requested only after every exit service timed out, to tell a node that
+// cannot reach the internet from one whose exit blocks the echo services; its
+// response never supplies an exit IP.
+const exitProbeReachabilityURL = "https://www.gstatic.com/generate_204"
+
 // A slow service does not hold back the next one. Each service starts when
 // every earlier one has failed or after this delay, whichever comes first.
 const exitProbeStagger = 1500 * time.Millisecond
 
-func probeExitIP(ctx context.Context, e *Egress) (string, error) {
+// An empty reachability URL skips the follow-up request after a timeout.
+func probeExitIP(ctx context.Context, e *Egress, reachability string) (string, error) {
 	transport := &http.Transport{Proxy: nil, DialContext: e.DialContext, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("probe redirect refused") }}
-	return probeExitIPServices(ctx, client, exitProbeServices, exitProbeStagger)
+	return probeExitIPServices(ctx, client, exitProbeServices, exitProbeStagger, reachability)
 }
 
 var (
@@ -73,6 +80,10 @@ var (
 	// ErrExitProbeTimeout reports that every exit probe timed out waiting for a
 	// live exit IP measurement.
 	ErrExitProbeTimeout = errors.New("exit probe timed out")
+	// ErrExitProbeBlocked reports that every exit probe timed out while the
+	// same proxy reached the fixed reachability target, so the exit most
+	// likely blocks the echo services rather than the node being down.
+	ErrExitProbeBlocked = errors.New("exit probe services blocked by the proxy exit")
 )
 
 type exitProbeStageTiming struct {
@@ -94,7 +105,7 @@ type exitProbeResult struct {
 // probeExitIPServices returns the first valid public IPv4 reported by any
 // service. Every request uses the same proxied client; no result is accepted
 // unless it passes the same validation, so a fallback never widens the check.
-func probeExitIPServices(ctx context.Context, client *http.Client, services []exitProbeService, stagger time.Duration) (string, error) {
+func probeExitIPServices(ctx context.Context, client *http.Client, services []exitProbeService, stagger time.Duration, reachability string) (string, error) {
 	requestCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan exitProbeResult, len(services))
@@ -160,12 +171,52 @@ func probeExitIPServices(ctx context.Context, client *http.Client, services []ex
 		return "", usererror.Wrap("通过所选代理查询出口 IP", ctx.Err(), "外网保持关闭。")
 	}
 	if allTimedOut {
-		return "", usererror.New("实时出口采样超时", strings.Join(reported, "；"), "实时出口采样超时，请稍后重试或切换更稳定的代理节点；外网保持关闭。", errors.Join(ErrExitProbeTimeout, context.DeadlineExceeded))
+		next, cause := "实时出口采样超时，请稍后重试或切换更稳定的代理节点；外网保持关闭。", errors.Join(ErrExitProbeTimeout, context.DeadlineExceeded)
+		if reachability != "" && ctx.Err() == nil {
+			// Through the bundled core a SOCKS5 CONNECT is granted before the
+			// node is dialed, so an unreachable node and an exit that blocks
+			// the echo services both end as response timeouts.
+			switch reached, timedOut := proxyReaches(ctx, client, reachability); {
+			case reached:
+				next = "所选代理可以访问连通性检查地址，但出口 IP 检测服务均无响应，可能被节点出口按域名屏蔽；请更换节点，或请代理服务商放行 ipv4.icanhazip.com、api.ipify.org 和 1.1.1.1；外网保持关闭。"
+				cause = errors.Join(ErrExitProbeBlocked, cause)
+			case timedOut:
+				next = "通过所选代理访问连通性检查地址同样超时，节点可能无法连通；请检查节点地址、端口、账号密码以及本机到节点的网络，或切换节点；外网保持关闭。"
+			}
+		}
+		return "", usererror.New("实时出口采样超时", strings.Join(reported, "；"), next, cause)
 	}
 	if allProxyConnectFailed {
 		return "", usererror.New("代理连接失败", strings.Join(reported, "；"), "未能通过所选代理建立连接，请检查代理核心与节点状态；外网保持关闭。", ErrProxyConnectFailed)
 	}
 	return "", errors.New("通过所选代理查询出口 IP 失败：" + strings.Join(reported, "；") + "。未能确认出口时，外网保持关闭。")
+}
+
+// proxyReaches reports whether one GET to endpoint returned HTTP 204 through
+// the client, and otherwise whether the request timed out.
+func proxyReaches(ctx context.Context, client *http.Client, endpoint string) (reached, timedOut bool) {
+	started := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, false
+	}
+	resp, err := client.Do(req)
+	if ctx.Err() != nil {
+		// The caller's deadline says nothing about the node.
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+		return false, false
+	}
+	if err != nil {
+		var netErr net.Error
+		timedOut = errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout()
+		diagnostics.Log("warn", "exit-probe", fmt.Sprintf("service=reachability duration_ms=%d timeout=%t error=%v", time.Since(started).Milliseconds(), timedOut, usererror.Reason(err)))
+		return false, timedOut
+	}
+	_ = resp.Body.Close()
+	diagnostics.Log("info", "exit-probe", fmt.Sprintf("service=reachability duration_ms=%d status=%d", time.Since(started).Milliseconds(), resp.StatusCode))
+	return resp.StatusCode == http.StatusNoContent, false
 }
 
 func queryExitIP(ctx context.Context, client *http.Client, endpoint string) (string, error) {
@@ -412,7 +463,9 @@ func (g *EgressGate) serveDiagnostic(parent context.Context, conn net.Conn, faul
 		writeDiagnostic(conn, 200, map[string]bool{"ok": true})
 		return
 	}
-	ip, err := probeExitIP(ctx, e)
+	// The guest diagnostic reports only availability, so it skips the
+	// follow-up reachability request that classifies a timeout.
+	ip, err := probeExitIP(ctx, e, "")
 	g.mu.Lock()
 	g.state.Counters.ProbeTCP++
 	if fault && err != nil {

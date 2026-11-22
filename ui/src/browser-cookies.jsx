@@ -138,7 +138,7 @@ export function BrowserCookies({ tab, onClose }) {
     </div>}
     {editor && <CookieEditor key={editor.key || "new"} editor={editor} busy={busy} onChange={form => setEditor({ ...editor, form })}
       onCancel={() => setEditor(null)} onSave={() => run("set", editor.key || undefined, { cookie: cookieFromForm(editor.form) })} />}
-    {error && <p className="cookie-error" role="alert">{error}</p>}
+    {error && <p className="cookie-error" role="alert">{tr(error)}</p>}
     <div className="cookie-list" aria-busy={busy || loading}>
       {loading ? <p>{tr("正在读取 Cookie…")}</p> : data?.cookies.length === 0 ? <p>{tr("没有匹配的 Cookie。")}</p> : data?.cookies.map(cookie =>
         <article className="cookie-record" key={cookie.key}>

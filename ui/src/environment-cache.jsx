@@ -68,7 +68,7 @@ export function EnvironmentCache({ status, onConfirm }) {
       {inventory && <button disabled={disabled || !selected.length} onClick={() => mutate("clean")}>{tr("清理所选缓存")}{selected.length ? `（${selected.length}）` : ""}</button>}
     </div>
     {!status.ready && <p className="field-help">{tr("请先启动当前环境。此操作不会扫描本机其他应用的数据。")}</p>}
-    {error && <p role="alert" className="error-message">{error}</p>}
+    {error && <p role="alert" className="error-message">{tr(error)}</p>}
     {result && <div role="status" className="cache-result">
       <strong>{result.status === "partial" ? tr("部分项目未完成，请查看原因") : result.action === "clean" ? tr("缓存清理完成，恢复副本已保留") : tr("缓存恢复完成")}</strong>
       {result.outcomes.map(item => <p key={item.id}>{result.titles[item.id] || item.id}：{item.reason}</p>)}

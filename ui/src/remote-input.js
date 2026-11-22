@@ -1,5 +1,6 @@
 import { getKeycode, getKeysym } from "../.generated/novnc/core/input/util.js";
 import { api, writeClipboard, nativeAvailable, native } from "./api";
+import { translate } from "./message-catalog.mjs";
 import { caretPollDelay, caretPollFast, caretFreshFor } from "./caret-poll.mjs";
 import {
   readClipboardContent,
@@ -47,7 +48,7 @@ export function installRemoteInput(
     lateSymbolComposition = false,
     disposed = false;
   const target = document.createElement("textarea");
-  target.setAttribute("aria-label", inputLabel);
+  target.setAttribute("aria-label", translate(inputLabel));
   target.setAttribute("autocomplete", "off");
   target.setAttribute("autocapitalize", "off");
   target.setAttribute("wrap", "off");

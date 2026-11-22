@@ -115,7 +115,7 @@ export function TokenUsagePanel({ onConfirm }) {
   return <section className="token-usage" aria-label={tr("Claude 本地用量")}>
     <div className="token-page-heading"><div><h2>{tr("Token 活动")}</h2><p>{tr("Claude Code 与 Desktop Code · 本地记录汇总")}</p></div>
       <button className="token-refresh" disabled={busy || !data?.enabled || !data?.available} onClick={()=>load({action:"refresh"})}><RefreshCw size={15} className={busy?"token-spinning":""}/> {busy?tr("正在读取…"):tr("刷新统计")}</button></div>
-    {error && <p className="token-error" role="alert">{error}<button disabled={busy} onClick={()=>load(data?.enabled && data?.available?{action:"refresh"}:undefined)}>{tr("重试")}</button></p>}
+    {error && <p className="token-error" role="alert">{tr(error)}<button disabled={busy} onClick={()=>load(data?.enabled && data?.available?{action:"refresh"}:undefined)}>{tr("重试")}</button></p>}
     {!data && <p role="status">{tr("正在读取本地统计…")}</p>}
     {data && <>
       {!data.available && <p className="token-notice" role="status">{tr("环境尚未就绪，显示上次保存的统计。启动环境并完成组件更新后可刷新。")}</p>}

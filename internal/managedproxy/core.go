@@ -176,7 +176,39 @@ func DelayError(err error) error {
 }
 
 func Running(ctx context.Context, profile string, s Store) bool {
-	return checkRunning(ctx, profile, s) == nil
+	return RunningStage(ctx, profile, s) == ""
+}
+
+// RunningStage reports a fixed diagnostic stage code when the managed proxy
+// core is not ready for the selected route. It never includes node addresses,
+// credentials, headers, or host paths.
+func RunningStage(ctx context.Context, profile string, s Store) string {
+	return runningStageError(checkRunning(ctx, profile, s))
+}
+
+const CoreDisconnectedStage = "readiness.configs.disconnected"
+
+func runningStageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	var core *coreError
+	if errors.As(err, &core) && core.stage != "" {
+		if core.stage == "readiness.configs" && (errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist)) {
+			return CoreDisconnectedStage
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return core.stage + ".timeout"
+		}
+		return core.stage
+	}
+	if errors.Is(err, ErrLocalProxyNode) {
+		return "route.local_node"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "route"
 }
 
 // EnsureRunning restores the applied core before collecting gate evidence.
@@ -282,8 +314,7 @@ func Start(ctx context.Context, profile string, s Store) error {
 		return err
 	}
 	path := filepath.Join(Dir(profile), "config.yaml")
-	bound, _ := BoundInterface(path)
-	if bound == name && Running(ctx, profile, s) {
+	if BindingMatches(path, name) && Running(ctx, profile, s) {
 		return nil
 	}
 	if err := Validate(ctx, profile, s); err != nil {

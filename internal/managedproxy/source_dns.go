@@ -12,6 +12,14 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// ErrSourceNodeDNS marks a source rejected for its node resolver list alone:
+// its nodes parsed, so "no importable nodes" would misstate the cause.
+var ErrSourceNodeDNS = errors.New("unsupported source node DNS")
+
+type sourceNodeDNSError struct{ error }
+
+func (sourceNodeDNSError) Is(target error) bool { return target == ErrSourceNodeDNS }
+
 // Adopt only the subscription's node resolver list. Its business resolvers,
 // policies, hosts, routes and DNS listener remain outside the import boundary.
 func subscriptionNodeDNS(data []byte) ([]string, error) {
@@ -25,9 +33,13 @@ func subscriptionNodeDNS(data []byte) ([]string, error) {
 		Servers []string `yaml:"proxy-server-nameserver"`
 	}
 	if input.DNS.Decode(&dns) != nil {
-		return nil, errors.New("订阅的节点 DNS 需要填写 HTTPS DoH 地址列表")
+		return nil, sourceNodeDNSError{errors.New("订阅的节点 DNS 需要填写 HTTPS DoH 地址列表")}
 	}
-	return validateSourceDNS(dns.Servers)
+	servers, err := validateSourceDNS(dns.Servers)
+	if err != nil {
+		return nil, sourceNodeDNSError{err}
+	}
+	return servers, nil
 }
 
 func validateSourceDNS(servers []string) ([]string, error) {

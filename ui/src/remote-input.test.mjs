@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import { webcrypto } from "node:crypto";
+import { translate } from "./message-catalog.mjs";
 import { caretPollDelay, caretPollFast, caretFreshFor } from "./caret-poll.mjs";
 const source = readFileSync(
   new URL("./remote-input.js", import.meta.url),
@@ -72,6 +73,7 @@ function fixture(native = false, browserComposition = false, options = {}) {
     caretPollDelay,
     caretPollFast,
     caretFreshFor,
+    translate,
     Promise,
     Map,
     Set,

@@ -192,7 +192,7 @@ cd "$HOME"
 # private, ephemeral runtime directory; no callback or cookie is inspected.
 input_session=()
 if [[ -x /usr/local/bin/cage-input-session ]]; then input_session=(/usr/local/bin/cage-input-session); fi
-DESKTOP_LOG_LEVEL=debug CLAUDE_ENABLE_LOGGING=1 DEBUG='*current-account*' "${input_session[@]}" claude-desktop "--user-data-dir=$base/data" --password-store=gnome-libsecret --xdg-portal-required-version=3 > >(/usr/bin/python3 -I /usr/local/lib/desktop-identity.py "$XDG_RUNTIME_DIR/account.json") &
+DESKTOP_LOG_LEVEL=debug CLAUDE_ENABLE_LOGGING=1 DEBUG='*current-account*' ${input_session[@]+"${input_session[@]}"} claude-desktop "--user-data-dir=$base/data" --password-store=gnome-libsecret --xdg-portal-required-version=3 > >(/usr/bin/python3 -I /usr/local/lib/desktop-identity.py "$XDG_RUNTIME_DIR/account.json") &
 app=$!
 printf '%s\n' "$app" > "$XDG_RUNTIME_DIR/app-pid"
 for _ in {1..250}; do
@@ -231,7 +231,7 @@ sudo systemd-run --quiet --no-block --collect --unit="$unit" --service-type=noti
   --property="User=$user" --property="RuntimeDirectory=$unit" --property=RuntimeDirectoryMode=0700 \
   --property=NotifyAccess=all --property=TimeoutStartSec=45 --property=TimeoutStopSec=8 \
   --property="ExecStop=/bin/bash /usr/local/lib/desktop-finish.sh $runtime $unit.service" \
-  --property=KillMode=control-group --property=PrivateTmp=yes "${props[@]}" \
+  --property=KillMode=control-group --property=PrivateTmp=yes ${props[@]+"${props[@]}"} \
   /usr/bin/dbus-run-session -- /bin/bash "$program" "$base" "$code"
 ok=
 trap 'if [[ -z "$ok" ]]; then sudo systemctl stop "$unit.service" >/dev/null 2>&1 || :; fi; rm -f -- "$program"' EXIT
