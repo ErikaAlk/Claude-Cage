@@ -446,7 +446,7 @@ export function HostPluginsSidebar({ visible, model, page, onPage, onBack, onCon
           {!shown.length && <p className="plugin-sidebar-hint">{query ? tr("没有匹配的插件") : tr("还没有安装插件")}</p>}
         </SidebarSection>}
       </div>
-      {error && view && <p className="plugin-sidebar-error" role="alert">{error}</p>}
+      {error && view && <p className="plugin-sidebar-error" role="alert">{tr(error)}</p>}
     </aside>
   );
 }
@@ -997,10 +997,10 @@ function SettingsPage({ model, status, onConfirm }) {
 export function HostPluginsPanel({ model, page, status, onConfirm, onPage }) {
   const tr = useTranslation();
   const { view, error } = model;
-  if (!view) return <div className="plugin-panel">{error ? <p role="alert" className="error-message">{error}</p> : <p role="status" className="plugin-loading"><LoaderCircle size={16} className="spin" />{tr("正在读取插件…")}</p>}</div>;
+  if (!view) return <div className="plugin-panel">{error ? <p role="alert" className="error-message">{tr(error)}</p> : <p role="status" className="plugin-loading"><LoaderCircle size={16} className="spin" />{tr("正在读取插件…")}</p>}</div>;
   return (
     <div className="plugin-panel">
-      {error && <p role="alert" className="plugin-banner problem"><TriangleAlert size={17} /><span>{error}</span></p>}
+      {error && <p role="alert" className="plugin-banner problem"><TriangleAlert size={17} /><span>{tr(error)}</span></p>}
       {page.kind === "plugin" ? <Detail key={page.name} model={model} name={page.name} onConfirm={onConfirm} onPage={onPage} />
         : page.kind === "market" ? <Market model={model} onConfirm={onConfirm} onPage={onPage} />
         : <SettingsPage model={model} status={status} onConfirm={onConfirm} />}

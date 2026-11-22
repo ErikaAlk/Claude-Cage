@@ -156,7 +156,7 @@ func LocationLookupOptions(configPath string) exitpolicy.LookupOptions {
 }
 
 func verifyNodeExit(ctx context.Context, raw *Egress, cfg Config, file string, options exitpolicy.LookupOptions) error {
-	ip, err := probeExitIP(ctx, raw)
+	ip, err := probeExitIP(ctx, raw, exitProbeReachabilityURL)
 	if err != nil {
 		return err
 	}

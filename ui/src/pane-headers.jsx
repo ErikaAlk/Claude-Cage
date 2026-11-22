@@ -42,8 +42,8 @@ export function TerminalHeader({ tab, contentWorkspace, project, metadata, termi
         {tab && (
           <>
             <ChevronRight size={13} />
-            <span className="current-title" title={tabName(tab, metadata, project)}>
-              {tabName(tab, metadata, project)}
+            <span className="current-title" title={tabName(tab, metadata, project, tr)}>
+              {tabName(tab, metadata, project, tr)}
             </span>
             {terminalDetail && <span className="terminal-detail" title={terminalDetailHint}>{terminalDetail}</span>}
           </>

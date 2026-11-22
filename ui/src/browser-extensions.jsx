@@ -84,7 +84,7 @@ function LocalExtensionImport({ existing, onUpdated, onClose }) {
   return <section className="extension-import" aria-label={tr("从本机导入扩展")}>
     <div className="browser-setting-heading"><h3>{tr("从本机浏览器导入")}</h3><button className="icon-button" aria-label={tr("关闭本机导入")} disabled={busy} onClick={onClose}><X size={16} /></button></div>
     <p>{tr("一次复制所选扩展及启停状态。浏览器账户、Cookie 和扩展登录数据保留在本机浏览器中。")}</p>
-    {error && <p className="browser-settings-error" role="alert">{error}</p>}
+    {error && <p className="browser-settings-error" role="alert">{tr(error)}</p>}
     {!profiles && !error && <p role="status">{tr("正在查找本机浏览器配置…")}</p>}
     {profiles?.length === 0 && <p>{tr("未找到 Edge、Chrome、Brave 或 Chromium 的扩展配置。")}</p>}
     {Boolean(profiles?.length) && <>
@@ -160,7 +160,7 @@ export function BrowserExtensions({ onOpenPage, onInternal, onConfirm }) {
     </div>
     <input ref={file} type="file" accept=".zip,application/zip" hidden onChange={select} aria-label={tr("选择扩展 ZIP")} />
     <p>{tr("支持 Chromium Manifest V3 扩展。扩展运行在 Cage 环境中，并按声明的权限访问网站。")}</p>
-    {error && <p className="browser-settings-error" role="alert">{error}</p>}
+    {error && <p className="browser-settings-error" role="alert">{tr(error)}</p>}
     {busy === 'upload' && <p role="status">{tr("正在读取扩展包…")}</p>}
     {preview && <section className="extension-install-preview" aria-label={tr("确认扩展安装")}>
       <h3>{tr("确认安装") + " "}{preview.name}</h3><p>{tr("版本") + " "}{preview.version}</p><p>{preview.description}</p>

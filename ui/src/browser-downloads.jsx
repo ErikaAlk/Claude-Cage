@@ -480,6 +480,28 @@ export function BrowserDownloads({
                             {retrying === item.id ? tr("正在重试…") : tr("重试保存")}
                           </button>
                         )}
+                        {item.retryable && item.target !== "desktop" && (
+                          <button
+                            className="download-text-action"
+                            disabled={!ready || Boolean(retrying)}
+                            onClick={async () => {
+                              setRetrying(`discard:${item.id}`);
+                              try {
+                                await api("/browser/download-discard", {
+                                  id: item.id,
+                                });
+                              } catch (error) {
+                                onStatus(error.message);
+                              } finally {
+                                setRetrying("");
+                              }
+                            }}
+                          >
+                            {retrying === `discard:${item.id}`
+                              ? tr("正在丢弃…")
+                              : tr("丢弃文件")}
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>

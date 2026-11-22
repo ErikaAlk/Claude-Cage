@@ -479,7 +479,7 @@ export function EnvironmentDeviceReset({ status, onConfirm, onOpenProxy }) {
 
           {error && (
             <p role="alert" className="error-message">
-              <SafetyMessage message={error} />
+              <SafetyMessage message={tr(error)} />
             </p>
           )}
           {status.job?.running && (status.job.kind === "device-reset" || status.job.kind === "device-reset-restore") && (
@@ -489,7 +489,7 @@ export function EnvironmentDeviceReset({ status, onConfirm, onOpenProxy }) {
           )}
           {notice && (
             <p role="status" className="field-help">
-              {notice}
+              {tr(notice)}
             </p>
           )}
 

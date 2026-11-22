@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 )
@@ -738,7 +739,13 @@ func (s *Server) retireLocalProxyCore() error {
 	return nil
 }
 
+const proxyNotReadyReason = "内置代理未就绪；外网保持关闭"
+
 func (s *Server) checkProxyHealth() {
+	s.checkProxyHealthWith(managedproxy.RunningStage)
+}
+
+func (s *Server) checkProxyHealthWith(runningStage func(context.Context, string, managedproxy.Store) string) {
 	if s.busy() {
 		return
 	}
@@ -754,22 +761,83 @@ func (s *Server) checkProxyHealth() {
 	p, err := s.proxyStore.Load(s.profile)
 	ctx, cancel := context.WithTimeout(s.lifetimeContext(), 2*time.Second)
 	defer cancel()
-	reason := "内置代理未就绪；外网保持关闭"
-	if err == nil {
-		if _, routeErr := p.Route(); errors.Is(routeErr, managedproxy.ErrLocalProxyNode) {
-			reason = routeErr.Error()
-		} else if s.proxyStore.Applied(s.profile, cfg.ProxyURL, cfg.ProxyRevision) == nil {
-			if managedproxy.Running(ctx, s.profile, p) {
-				return
-			}
-			s.recoverInterruptedProxy()
-			return
-		}
+	reason := proxyNotReadyReason
+	stage := ""
+	if err != nil {
+		stage = "store.load"
+	} else if _, routeErr := p.Route(); errors.Is(routeErr, managedproxy.ErrLocalProxyNode) {
+		reason = routeErr.Error()
+		stage = "route.local_node"
+	} else if s.proxyStore.Applied(s.profile, cfg.ProxyURL, cfg.ProxyRevision) != nil {
+		stage = "store.unapplied"
+	} else if stage = runningStage(ctx, s.profile, p); stage == "" {
+		s.scheduleProxyHealthRecovery(ctx, cfg.Fingerprint())
+		return
+	} else if stage == managedproxy.CoreDisconnectedStage {
+		s.recoverInterruptedProxy()
+		return
 	}
+	s.mu.Lock()
+	previouslyOpen := s.safety.Gate != nil && s.safety.Gate.Mode == cage.GateOpen
+	previousError := s.safety.monitorError
+	s.mu.Unlock()
 	_ = s.closeProxyGate(reason)
 	s.mu.Lock()
 	s.safety.monitorError = reason
+	if s.recovery.RunID != "" {
+		s.recovery = networkRecovery{}
+	}
 	s.mu.Unlock()
+	if previouslyOpen || previousError != reason {
+		diagnostics.Log("warn", "proxy", "proxy health check failed; egress gate closed (stage="+stage+")")
+	}
+}
+
+// After a transient proxy health check failure closes the gate, a recovered
+// core never reopens networking directly: it schedules one ordinary full
+// safety recheck for that exact closed gate epoch and configuration.
+func (s *Server) scheduleProxyHealthRecovery(ctx context.Context, configuration string) {
+	s.mu.Lock()
+	paused, closing, ready := s.networkPaused, s.closing, s.ready
+	gate := s.safety.Gate
+	pauseVersion := s.safety.pauseVersion
+	existing := s.recovery
+	s.mu.Unlock()
+	if paused || closing || !ready || gate == nil || gate.Mode != cage.GateClosed || gate.Reason != proxyNotReadyReason || gate.Configuration != configuration || gate.Report == nil {
+		return
+	}
+	if recoveryMatches(existing, *gate, configuration, paused, pauseVersion) {
+		return
+	}
+	client, err := s.gateClient()
+	if err != nil {
+		return
+	}
+	state, err := client.Status(ctx)
+	if err != nil {
+		return
+	}
+	s.publishGate(state)
+	if state.Mode != cage.GateClosed || state.Reason != proxyNotReadyReason || state.Configuration != configuration || state.Report == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.networkPaused || s.closing || !s.ready ||
+		s.safety.pauseVersion != pauseVersion ||
+		s.safety.Gate == nil || s.safety.Gate.RunID != state.RunID || s.safety.Gate.Epoch != state.Epoch || s.safety.Gate.Mode != cage.GateClosed ||
+		recoveryMatches(s.recovery, state, configuration, s.networkPaused, s.safety.pauseVersion) {
+		s.mu.Unlock()
+		return
+	}
+	s.recovery = networkRecovery{
+		RunID:         state.RunID,
+		Configuration: state.Configuration,
+		Epoch:         state.Epoch,
+		PauseVersion:  s.safety.pauseVersion,
+		Next:          time.Now().Add(15 * time.Second),
+	}
+	s.mu.Unlock()
+	diagnostics.Log("warn", "network", "temporary monitoring failure; full recheck scheduled: "+state.Reason)
 }
 
 func (s *Server) recoverInterruptedProxy() {

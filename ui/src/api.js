@@ -1,13 +1,15 @@
 import { reportDiagnostic } from "./diagnostics.mjs";
-import { httpErrorMessage, connectionErrorMessage, operationName, nativeFailureMessage } from "./error-message.mjs";
+import { httpErrorMessage, connectionErrorMessage, operationName, nativeFailureMessage, errorText, localizeFailure } from "./error-message.mjs";
 import { assertConnection, connectionHeaders, getClientContext, isProjectSharesPath } from "./client-context.mjs";
 import { installAgentNativeConsumer } from "./agent-native.js";
+import { translate } from "./message-catalog.mjs";
+
 let sessionRenewal;
 class WorkbenchUnreachable extends Error {}
 async function responseError(response, path, method = "GET") {
   const body = await response.text();
   const error = new Error(
-    httpErrorMessage(path, response.status, body, response.headers.get("Content-Type") || "", method),
+    httpErrorMessage(path, response.status, body, response.headers.get("Content-Type") || "", method, translate),
   );
   error.status = response.status;
   // Plugin page calls answer with a JSON-RPC error code and message.
@@ -52,7 +54,7 @@ export async function api(path, body, method, headers = {}, { signal } = {}) {
     catch (error) {
       if (signal?.aborted) throw signal.reason;
       reportDiagnostic("frontend", error);
-      const message = connectionErrorMessage(path, options.method);
+      const message = connectionErrorMessage(path, options.method, translate);
       if (error instanceof TypeError) throw new WorkbenchUnreachable(message, { cause: error });
       throw new Error(message, { cause: error });
     }
@@ -68,7 +70,7 @@ export async function api(path, body, method, headers = {}, { signal } = {}) {
   if (!response.ok) throw await responseError(response, path, options.method);
   let value;
   try { value = await response.json(); }
-  catch (error) { reportDiagnostic("frontend", error); throw new Error(`${operationName(path, options.method)}失败：后台返回的结果格式无效。请重新连接；仍出现时在设置中导出诊断包。`, { cause: error }); }
+  catch (error) { reportDiagnostic("frontend", error); throw new Error(localizeFailure(translate, errorText.invalidResponse, operationName(path, options.method)), { cause: error }); }
   if (path !== "/session" && !path.startsWith("/agent/native") && (!path.startsWith("/client/") || isProjectSharesPath(path))) assertConnection(connection);
   return value;
 }
@@ -90,7 +92,7 @@ export async function uploadFile(path, file, { signal, onProgress } = {}) {
       cleanup();
       if (request.status === 423) window.dispatchEvent(new Event("cage-account-locked"));
       if (request.status !== 200) {
-        const error = new Error(httpErrorMessage(path, request.status, request.responseText, request.getResponseHeader("Content-Type") || ""));
+        const error = new Error(httpErrorMessage(path, request.status, request.responseText, request.getResponseHeader("Content-Type") || "", "POST", translate));
         error.status = request.status; reject(error); return;
       }
       try { assertConnection(connection); }
@@ -145,7 +147,7 @@ export async function native(action, extra = {}) {
   catch (error) {
     reportDiagnostic("frontend", error);
     const original = error?.message || String(error);
-    const message = nativeFailureMessage(action, original);
+    const message = nativeFailureMessage(action, original, translate);
     if (message === original) throw error;
     throw new Error(message, { cause: error });
   }

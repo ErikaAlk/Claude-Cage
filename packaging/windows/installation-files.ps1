@@ -100,8 +100,66 @@ function Stream-Hash([IO.Stream]$Stream) {
     finally { $algorithm.Dispose(); $Stream.Position = 0 }
 }
 
+# Windows PowerShell 5.1 compiles Add-Type with csc.exe, which cannot write its
+# output below a temporary folder that the ANSI code page cannot encode and
+# fails with "The directory name is invalid". The compile alone then uses the
+# folder's 8.3 short form, or a private folder under the system temporary
+# folder; the type is loaded in memory, so that folder is removed afterwards.
+function Test-AnsiPath([string]$Path) {
+    return [Text.Encoding]::Default.GetString([Text.Encoding]::Default.GetBytes($Path)) -eq $Path
+}
+
+function Compiler-TemporaryFolder {
+    $temporary = [IO.Path]::GetTempPath()
+    if ($PSVersionTable.PSEdition -ne 'Desktop' -or (Test-AnsiPath $temporary)) { return $null }
+    if ($env:SystemRoot) {
+        $private = Join-Path $env:SystemRoot ('Temp\cage-' + [guid]::NewGuid().ToString('N'))
+        try {
+            [IO.Directory]::CreateDirectory($private) | Out-Null
+            return @{path = $private; created = $true}
+        } catch { }
+    }
+    try {
+        $short = (New-Object -ComObject Scripting.FileSystemObject).GetFolder($temporary).ShortPath
+        if ($short -and (Test-AnsiPath $short) -and $short -notmatch '[?*]' -and [IO.Directory]::Exists($short)) {
+            return @{path = $short; created = $false}
+        }
+    } catch { }
+    return $null
+}
+
 function Initialize-VerifiedDeletion {
-    if (!('CageVerifiedFile' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'verified-file-deletion.cs') }
+    if ('CageVerifiedFile' -as [type]) { return }
+    # Read the C# source through .NET so csc.exe never receives a source file
+    # path under a non-ANSI $PLUGINSDIR inside TEMP.
+    $code = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'verified-file-deletion.cs'), [Text.Encoding]::UTF8)
+    $folder = Compiler-TemporaryFolder
+    $workDir = if ($env:SystemRoot -and [IO.Directory]::Exists($env:SystemRoot)) { $env:SystemRoot } elseif ($folder) { $folder.path } else { $null }
+    if (!$folder -and !$workDir) { Add-Type -TypeDefinition $code; return }
+    $saved = $env:TMP, $env:TEMP
+    $savedDirectory = [Environment]::CurrentDirectory
+    $pushed = $false
+    try {
+        if ($folder) { $env:TMP = $env:TEMP = $folder.path }
+        if ($workDir) {
+            Push-Location -LiteralPath $workDir
+            $pushed = $true
+            [Environment]::CurrentDirectory = $workDir
+        }
+        Add-Type -TypeDefinition $code
+    } finally {
+        if ($pushed) { Pop-Location }
+        [Environment]::CurrentDirectory = $savedDirectory
+        $env:TMP, $env:TEMP = $saved
+        if ($folder -and $folder.created) {
+            # A standard user cannot list the system temporary folder, so the
+            # private folder is removed directly rather than with Remove-Item.
+            try {
+                foreach ($file in [IO.Directory]::GetFiles($folder.path)) { [IO.File]::Delete($file) }
+                [IO.Directory]::Delete($folder.path)
+            } catch { }
+        }
+    }
 }
 
 function Remove-MatchingFile([string]$Root, [string]$Relative, [string]$Hash) {
@@ -230,6 +288,14 @@ foreach ($rootPath in @($Target, $Source)) {
 if ($Operation -eq 'prepare') {
     $diagnosticStep = 'reading_new_manifest'
     if (Test-Path -LiteralPath $Receipt) { throw ('仍有未完成的安装事务，请保留并检查回执：' + $Receipt) }
+    # Completing the receipt deletes it through the verified-deletion type.
+    # Compiling it before the receipt exists stops an installation that could
+    # not complete before any file is published.
+    if ($env:OS -eq 'Windows_NT') {
+        $diagnosticStep = 'loading_verified_deletion'
+        Initialize-VerifiedDeletion
+        $diagnosticStep = 'reading_new_manifest'
+    }
     $current = Read-FileManifest (Join-Path $Target $manifestName)
     $legacySnapshot = !$current.Count -and $LegacyTarget
     if ($legacySnapshot) {

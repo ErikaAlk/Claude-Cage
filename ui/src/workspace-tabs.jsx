@@ -96,7 +96,7 @@ export function WorkspaceTabs({
   const tabWidth = (id) =>
     id === active ? activeWidth : Math.min(220, otherWidth);
   const matchingTabs = tabs.filter((tab) =>
-    `${tabName(tab, saved)} ${tab.url || ""}`
+    `${tabName(tab, saved, undefined, tr)} ${tab.url || ""}`
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
@@ -312,7 +312,7 @@ export function WorkspaceTabs({
         }
       >
         {tabs.map((tab, index) => {
-          const title = tabName(tab, saved);
+          const title = tabName(tab, saved, undefined, tr);
           const opening = Boolean(openingSession) && openingSession === tab.cli_session_id;
           const runningElsewhere = tab.sessionRunningElsewhere;
           const runningNotice = tab.sessionClaudeDesktop
@@ -492,7 +492,7 @@ export function WorkspaceTabs({
                       <TabIcon kind={tab.kind} favicon={tab.favicon}
                         agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
                         accountNumber={tab.claudeAccountNumber} />
-                      <span>{tabName(tab, saved)}</span>
+                      <span>{tabName(tab, saved, undefined, tr)}</span>
                       {tab.id === active && (
                         <span className="current-tab-marker">{tr("当前")}</span>
                       )}

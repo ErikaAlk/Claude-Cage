@@ -51,7 +51,9 @@ if [[ "$platform" == macos ]]; then
   node scripts/bundle-cloud-kit.mjs "$bundle/Contents/Resources"
   cp "$stage/cage" "$bundle/Contents/Resources/cage"
   node scripts/collect-app-licenses.mjs "$bundle/Contents/Resources/licenses"
-  xcrun swift ${swift_flags[@]+"${swift_flags[@]}"} desktop/Icon.swift logo.png "$stage/Cage.iconset"
+  # 先编译再运行图标生成器：仅装 Command Line Tools 时，Swift 解释器的 JIT 可能解析不到 AppKit 符号（#687）
+  xcrun swiftc ${swift_flags[@]+"${swift_flags[@]}"} desktop/Icon.swift -o "$stage/cage-icon"
+  "$stage/cage-icon" logo.png "$stage/Cage.iconset"
   iconutil -c icns "$stage/Cage.iconset" -o "$bundle/Contents/Resources/Cage.icns"
   cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -47,10 +47,11 @@ func TestExitProbeClassifiesProxyTimeout(t *testing.T) {
 	}()
 	cfg := DefaultConfig()
 	cfg.ProxyURL = "http://" + listener.Addr().String()
-	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	ip, err := ProbeExitIP(ctx, cfg)
-	if ip != "" || !errors.Is(err, context.DeadlineExceeded) || connections.Load() != 3 {
+	// Three exit services, then one reachability check through the same proxy.
+	if ip != "" || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrExitProbeBlocked) || !strings.Contains(err.Error(), "节点可能无法连通") || connections.Load() != 4 {
 		t.Fatalf("three timed-out proxy probes = %q, %v, connections=%d", ip, err, connections.Load())
 	}
 }
@@ -444,7 +445,7 @@ func TestExitProbeSlowPrimaryDoesNotDelayFallback(t *testing.T) {
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
 	started := time.Now()
-	ip, err := probeExitIPServices(context.Background(), client, services, 100*time.Millisecond)
+	ip, err := probeExitIPServices(context.Background(), client, services, 100*time.Millisecond, "")
 	if err != nil || ip != "8.8.8.8" {
 		t.Fatalf("staggered probe = %q, %v", ip, err)
 	}
@@ -472,11 +473,11 @@ func TestExitProbeFailedServicesStartNextImmediately(t *testing.T) {
 	}
 	started := time.Now()
 	// A long stagger proves the failures, not the timer, advanced the probe.
-	ip, err := probeExitIPServices(context.Background(), &http.Client{Timeout: 5 * time.Second}, services, time.Minute)
+	ip, err := probeExitIPServices(context.Background(), &http.Client{Timeout: 5 * time.Second}, services, time.Minute, "")
 	if err != nil || ip != "8.8.4.4" || time.Since(started) > 5*time.Second {
 		t.Fatalf("trace fallback = %q, %v after %v", ip, err, time.Since(started))
 	}
-	ip, err = probeExitIPServices(context.Background(), &http.Client{Timeout: 5 * time.Second}, services[:2], time.Minute)
+	ip, err = probeExitIPServices(context.Background(), &http.Client{Timeout: 5 * time.Second}, services[:2], time.Minute, "")
 	if err == nil || ip != "" || !strings.Contains(err.Error(), "HTTP 503") || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("all failed services must stay closed: %q, %v", ip, err)
 	}
@@ -521,8 +522,58 @@ func TestExitProbeDistinguishesProxyConnectFailureFromTimeout(t *testing.T) {
 	}))
 	defer stalled.Close()
 	services := []exitProbeService{{id: "slow", name: "慢检测服务", endpoint: stalled.URL}}
-	ip, err = probeExitIPServices(context.Background(), &http.Client{Timeout: 80 * time.Millisecond}, services, time.Minute)
+	ip, err = probeExitIPServices(context.Background(), &http.Client{Timeout: 80 * time.Millisecond}, services, time.Minute, "")
 	if ip != "" || !errors.Is(err, ErrExitProbeTimeout) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrProxyConnectFailed) || !strings.Contains(err.Error(), "实时出口采样超时") {
 		t.Fatalf("stalled service expected ErrExitProbeTimeout, got ip=%q err=%v", ip, err)
+	}
+}
+
+func TestExitProbeTimeoutChecksWhetherTheProxyReachesTheInternet(t *testing.T) {
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer stalled.Close()
+	var checks atomic.Int32
+	reachable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		checks.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer reachable.Close()
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+	services := []exitProbeService{{id: "a", name: "主检测服务", endpoint: stalled.URL}, {id: "b", name: "备用检测服务", endpoint: stalled.URL}}
+	probe := func(reachability string) error {
+		ip, err := probeExitIPServices(context.Background(), &http.Client{Timeout: 80 * time.Millisecond}, services, time.Minute, reachability)
+		if ip != "" || !errors.Is(err, ErrExitProbeTimeout) || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "实时出口采样超时") || !strings.Contains(err.Error(), "备用检测服务") {
+			t.Fatalf("all timed out services must keep the timeout error: ip=%q err=%v", ip, err)
+		}
+		return err
+	}
+
+	err := probe(reachable.URL)
+	if !errors.Is(err, ErrExitProbeBlocked) || !strings.Contains(err.Error(), "可能被节点出口按域名屏蔽") || checks.Load() != 1 {
+		t.Fatalf("reachable proxy must report blocked echo services: checks=%d err=%v", checks.Load(), err)
+	}
+	err = probe(stalled.URL)
+	if errors.Is(err, ErrExitProbeBlocked) || !strings.Contains(err.Error(), "节点可能无法连通") {
+		t.Fatalf("stalled reachability check must point at the node: %v", err)
+	}
+	for _, reachability := range []string{other.URL, ""} {
+		err = probe(reachability)
+		if errors.Is(err, ErrExitProbeBlocked) || !strings.Contains(err.Error(), "请稍后重试或切换更稳定的代理节点") {
+			t.Fatalf("unconfirmed reachability %q must keep the generic hint: %v", reachability, err)
+		}
+	}
+
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer failing.Close()
+	checks.Store(0)
+	ip, err := probeExitIPServices(context.Background(), &http.Client{Timeout: time.Second}, []exitProbeService{{id: "a", name: "a", endpoint: failing.URL}}, time.Minute, reachable.URL)
+	if ip != "" || err == nil || errors.Is(err, ErrExitProbeBlocked) || checks.Load() != 0 {
+		t.Fatalf("non-timeout failures must not run the reachability check: checks=%d err=%v", checks.Load(), err)
 	}
 }

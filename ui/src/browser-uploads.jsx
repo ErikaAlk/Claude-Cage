@@ -113,7 +113,7 @@ export function BrowserUploads({ requests = [], onStatus }) {
             <progress aria-label={tr("文件传递进度")} max="100" value={nativeAvailable() ? undefined : percent} />
           </>
         )}
-        {error && <p role="alert">{error}</p>}
+        {error && <p role="alert">{tr(error)}</p>}
       </div>
     </Modal>
   );

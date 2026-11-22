@@ -85,6 +85,13 @@ def cli_environment(base):
         # Let Claude resolve its normal ~/.claude.json and ~/.claude itself.
         # Preserve provider variables: an API-authenticated shell is not a
         # signed-in default subscription, even if a previous login exists.
+        # A caller may pass CLAUDE_CONFIG_DIR naming that same ~/.claude (the
+        # session channel does): with it set, Claude reads its global config
+        # from ~/.claude/.claude.json instead and loses user-level MCP servers
+        # (#662). A different directory chosen by the user is kept.
+        inherited = env.get("CLAUDE_CONFIG_DIR")
+        if inherited and Path(inherited).resolve() == (Path.home() / ".claude").resolve():
+            del env["CLAUDE_CONFIG_DIR"]
         return _runtime["environment"](env)
     env["CLAUDE_CONFIG_DIR"] = str(config_directory(base))
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",

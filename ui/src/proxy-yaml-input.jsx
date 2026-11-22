@@ -185,7 +185,7 @@ export function ProxyYAMLInput({
       {error && (
         <p id={errorID} className="proxy-yaml-error" role="alert">
           <AlertCircle size={15} aria-hidden="true" />
-          {error}
+          {tr(error)}
         </p>
       )}
       <label>

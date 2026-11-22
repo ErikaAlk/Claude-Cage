@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,21 @@ func ResourceLimits() (memoryGiB, cpus int) {
 	if cpus <= 0 {
 		cpus = 2
 	}
-	return host.Cap("memory", memoryGiB, io.Discard), host.Cap("cpus", cpus, io.Discard)
+	return host.Cap("memory", memoryGiB, io.Discard), vmCPULimit(runtime.GOOS, host.Cap("cpus", cpus, io.Discard))
+}
+
+// WindowsMaxCPUs bounds every VM on a Windows host, manual allocations
+// included. QEMU's Windows event loop waits on all virtio queue notifiers with
+// one WaitForMultipleObjects call (at most 64 handles), and the boot disk and
+// the cloud-init SCSI controller each get one queue per vCPU: from 31 vCPUs
+// QEMU aborts with "aio-win32.c: assertion failed: (count < 64)".
+const WindowsMaxCPUs = 16
+
+func vmCPULimit(goos string, cpus int) int {
+	if goos == "windows" {
+		return min(cpus, WindowsMaxCPUs)
+	}
+	return cpus
 }
 
 const resourceProbe = `LC_ALL=C; export LC_ALL

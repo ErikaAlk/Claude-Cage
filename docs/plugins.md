@@ -90,7 +90,7 @@ my-plugin/
   "version": "0.1.0",
   "description": "Shows processor load, memory and disk use.",
   "icon": "icon.svg",
-  "engines": { "cage": ">=0.1.8" },
+  "engines": { "cage": ">=0.2.0" },
   "kind": "guest",
   "permissions": [],
   "categories": ["system"],
@@ -116,7 +116,7 @@ my-plugin/
 | `kind` | 是 | `host` 或 `guest`，见上文 |
 | `platforms` | 否 | 仅主机插件：支持的系统 `darwin`、`linux`、`windows`，省略表示都支持 |
 | `permissions` | 是 | 插件会做的事，必须写明，没有就写空列表。可选值：`files`（读写文件）、`commands`（运行命令）、`screen`（查看屏幕）、`input`（控制键盘和鼠标）、`network`（访问网络）。环境内插件只需声明越出环境的能力 |
-| `categories` | 否 | 插件在市场里所属的分类，最多 3 个，见下表 |
+| `categories` | 否 | 插件在市场里所属的分类，最多 3 个，见下表。需要 `engines.cage` 至少为 `0.2.0`：更早的应用不认识这个字段，会拒绝整份清单 |
 | `contributes` | 是 | 插件提供的内容，见下 |
 
 清单里不能有其他字段，嵌套对象里也一样。字段名区分大小写。
@@ -133,7 +133,7 @@ my-plugin/
 | `productivity` | 效率 |
 | `example` | 示例 |
 
-应用遇到不认识的分类时保留但不显示，所以市场以后新增分类，不会让旧版应用拒绝插件。上架到市场的插件只能使用上表中的值。
+应用遇到不认识的分类时保留但不显示，所以市场以后新增分类，不会让旧版应用拒绝插件。这只针对分类的值：`categories` 字段本身从 0.2.0 起才被认识，`engines.cage` 低于 `0.2.0` 的插件写了它，在更早的应用里会显示为兼容，安装时却因清单含未知字段而失败。上架到市场的插件只能使用上表中的值。
 
 `contributes.mcpServers[]`：
 
@@ -206,7 +206,7 @@ my-plugin/
 }
 ```
 
-旧格式里不能写 `engines`、`kind`（`host` 除外）和 `activationEvents`，可以写 `categories`。
+旧格式里不能写 `engines`、`kind`（`host` 除外）和 `activationEvents`，可以写 `categories`。旧格式无法声明版本要求，写了 `categories` 的旧格式清单在 0.2.0 之前的应用里无法加载；需要兼容这些版本时不要写分类。
 
 ### 多国语言说明 `i18n.json` 与作者归属
 

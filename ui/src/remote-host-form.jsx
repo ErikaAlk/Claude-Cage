@@ -54,7 +54,7 @@ export function HostForm({ initial, platform, onSaved, onClose }) {
       <form className="remote-host-form" onSubmit={save}>
         {error && (
           <p className="error-message" role="alert">
-            {error}
+            {tr(error)}
           </p>
         )}
         <fieldset disabled={busy}>
