@@ -86,15 +86,32 @@ func (s *Server) clipboardCommand(ctx context.Context, operation string, selecti
 			command += " --desktop " + shellescape.Quote(selection.DesktopID)
 		}
 	case "import":
-		s.mu.Lock()
-		session := s.clipboardGuestSession
-		s.mu.Unlock()
+		session := selection.Session
+		desktopID := selection.DesktopID
+		if session == "" && desktopID == "" {
+			s.mu.Lock()
+			session = s.clipboardGuestSession
+			desktopID = s.clipboardDesktop
+			s.mu.Unlock()
+		}
 		command += " --import --session " + shellescape.Quote(session)
+		if desktopID != "" {
+			if !validClaudeID(desktopID) {
+				return nil, "", errors.New("Desktop 标识无效")
+			}
+			command += " --desktop " + shellescape.Quote(desktopID)
+		}
 	case "export":
 		if selection.User != "cage" && selection.User != "cage-browser" {
 			return nil, "", errors.New("剪贴板文件来源无效")
 		}
 		command += " --export-user " + selection.User + " --paths-stdin"
+		if selection.DesktopID != "" {
+			if !validClaudeID(selection.DesktopID) {
+				return nil, "", errors.New("Desktop 标识无效")
+			}
+			command += " --desktop " + shellescape.Quote(selection.DesktopID)
+		}
 	default:
 		return nil, "", errors.New("剪贴板操作无效")
 	}
@@ -108,6 +125,7 @@ func (s *Server) clipboardCommand(ctx context.Context, operation string, selecti
 
 type clipboardFileSelection struct {
 	DesktopID string
+	Session   string
 	Paths     []string
 	User      string
 	lease     *clipboardFileLease
@@ -119,13 +137,17 @@ type clipboardFileLease struct {
 	release func()
 }
 
-func (s *Server) registerClipboardFiles(paths []string, user string) string {
+func (s *Server) registerClipboardFiles(paths []string, user string, desktopID ...string) string {
+	desktop := ""
+	if len(desktopID) > 0 {
+		desktop = desktopID[0]
+	}
 	s.mu.Lock()
 	if s.clipboardFiles == nil {
 		s.clipboardFiles = map[string]clipboardFileSelection{}
 	}
 	for id, previous := range s.clipboardFiles {
-		if previous.User == user && slices.Equal(previous.Paths, paths) {
+		if previous.User == user && previous.DesktopID == desktop && slices.Equal(previous.Paths, paths) {
 			s.mu.Unlock()
 			return id
 		}
@@ -141,7 +163,7 @@ func (s *Server) registerClipboardFiles(paths []string, user string) string {
 	if release := s.clipboardRelease; release != nil {
 		lease.release = func() { release(ownedPaths) }
 	}
-	s.clipboardFiles[id] = clipboardFileSelection{Paths: ownedPaths, User: user, lease: lease}
+	s.clipboardFiles[id] = clipboardFileSelection{DesktopID: desktop, Paths: ownedPaths, User: user, lease: lease}
 	s.mu.Unlock()
 	for _, release := range releases {
 		release()
@@ -366,7 +388,7 @@ func (s *Server) sharedDesktopClipboard(w http.ResponseWriter, r *http.Request, 
 				if payload.Source != source && !(source == "cage" && payload.Source == "cage-browser") {
 					return
 				}
-				payload.Files, _ = json.Marshal(s.registerClipboardFiles(paths, payload.Source))
+				payload.Files, _ = json.Marshal(s.registerClipboardFiles(paths, payload.Source, desktopID))
 				payload.Source = ""
 			}
 			_ = ws.SetWriteDeadline(time.Now().Add(15 * time.Second))
@@ -396,11 +418,11 @@ func (s *Server) sharedDesktopClipboard(w http.ResponseWriter, r *http.Request, 
 			if json.Unmarshal(payload.Files, &id) != nil {
 				return
 			}
-			paths := s.clipboardFileSelection(id).Paths
-			if len(paths) == 0 {
+			selection := s.clipboardFileSelection(id)
+			if len(selection.Paths) == 0 || selection.DesktopID != desktopID {
 				return
 			}
-			payload.Files, _ = json.Marshal(paths)
+			payload.Files, _ = json.Marshal(selection.Paths)
 		}
 		if writeGuest(payload) != nil {
 			return
@@ -464,7 +486,10 @@ func (s *Server) clipboardArchive(w http.ResponseWriter, r *http.Request) {
 	if prepared.Unclean {
 		w.Header().Set("X-Cage-Metadata-Warning", "metadata-may-remain")
 	}
-	cmd, source, err := s.clipboardCommand(ctx, "import", clipboardFileSelection{})
+	s.mu.Lock()
+	session, desktopID := s.clipboardGuestSession, s.clipboardDesktop
+	s.mu.Unlock()
+	cmd, source, err := s.clipboardCommand(ctx, "import", clipboardFileSelection{Session: session, DesktopID: desktopID})
 	if err != nil {
 		http.Error(w, "传递剪贴板文件失败", 502)
 		return
@@ -485,7 +510,7 @@ func (s *Server) clipboardArchive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "传递剪贴板文件失败，请核对文件大小和名称", 502)
 		return
 	}
-	jsonReply(w, map[string]string{"files": s.registerClipboardFiles(result.Paths, source)})
+	jsonReply(w, map[string]string{"files": s.registerClipboardFiles(result.Paths, source, desktopID)})
 }
 
 func writeClipboardArchive(output io.Writer, paths []string, options ...transfermeta.Options) error {

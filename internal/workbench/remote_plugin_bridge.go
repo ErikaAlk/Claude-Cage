@@ -224,9 +224,10 @@ func (b *serverClientPluginBridge) applyToBridge(bridge *hostbridge.Bridge) ([]h
 			}
 		}
 	}
-	var taken map[string]bool
+	var taken, takenPrompts map[string]bool
 	if bridge != nil {
 		taken = bridge.BaseToolNames()
+		takenPrompts = bridge.BasePromptNames()
 	}
 	proxy, err := hostbridge.NewProxyPlugin(allTools, taken, active.callTool)
 	if err != nil {
@@ -235,9 +236,6 @@ func (b *serverClientPluginBridge) applyToBridge(bridge *hostbridge.Bridge) ([]h
 		}
 		return nil, []hostbridge.ProxySkipped{{Name: "*", Reason: err.Error()}}
 	}
-	if bridge != nil {
-		bridge.SetEphemeral(proxy)
-	}
 	accepted := proxy.ToolList()
 	skipped := proxy.Skipped()
 
@@ -245,6 +243,22 @@ func (b *serverClientPluginBridge) applyToBridge(bridge *hostbridge.Bridge) ([]h
 	for _, item := range accepted {
 		owner := toolOwner[item.Name]
 		acceptedByPlugin[owner] = append(acceptedByPlugin[owner], item)
+	}
+	promptGroups := make([]hostbridge.ProxyPromptGroup, 0, len(specs))
+	for _, spec := range specs {
+		var names []string
+		for _, item := range acceptedByPlugin[spec.Name] {
+			names = append(names, item.Name)
+		}
+		promptGroups = append(promptGroups, hostbridge.ProxyPromptGroup{
+			Name:        spec.Name,
+			DisplayName: spec.DisplayName,
+			Tools:       names,
+		})
+	}
+	proxy.SetPluginPrompts(promptGroups, takenPrompts)
+	if bridge != nil {
+		bridge.SetEphemeral(proxy)
 	}
 	skippedByPlugin := map[string][]hostbridge.ProxySkipped{}
 	for _, item := range skipped {
@@ -541,8 +555,8 @@ func (m *clientPluginBridgeManager) localApprove(manifest hostbridge.Manifest) f
 	return func(ctx context.Context, request hostbridge.ToolRequest) error {
 		title := fmt.Sprintf("允许远程主机「%s」使用你这台电脑上的插件？", label)
 		msg := "请求来源　远程主机「" + label + "」\n插件「" + request.Plugin + "」\n工具　" + request.Tool + "\n\n" + request.Arguments +
-			"\n\n插件将以你的系统账户权限在当前这台电脑上运行。「始终允许」会记住对该本机插件的授权，可在插件页随时撤销。"
-		return approvals.decide(ctx, hostGrantPlugin+request.Plugin, manifest.Permissions, request.Arguments, len(request.Arguments), title, msg, remoteApprovalPrompt{})
+			"\n\n插件将以你的系统账户权限在当前这台电脑上运行。「始终允许」只记住远程主机对该插件的使用，可在插件页随时撤销。"
+		return approvals.decide(ctx, hostGrantRemotePlugin+request.Plugin, manifest.Permissions, request.Arguments, len(request.Arguments), title, msg, remoteApprovalPrompt{})
 	}
 }
 

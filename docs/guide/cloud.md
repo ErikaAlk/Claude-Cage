@@ -45,7 +45,11 @@ keywords: 云端 远程部署 VPS SSH 无KVM rootless 服务器 主机 指纹 �
 - macOS 和 Linux：填写 Unix 套接字的绝对路径，不展开 `~` 和环境变量，长度不超过系统上限（macOS 103 字节，Linux 107 字节）。连接前核对它确实是套接字、属于当前用户，且组和其他用户没有写权限；可以是指向这样的套接字的符号链接。权限不符时按提示改为仅自己可读写（如 `chmod 600`）。
 - Windows：只接受本机命名管道，格式为 `\\.\pipe\名称`，不接受网络路径和其他文件路径。
 
-Cage 只连接你填写的位置，不读取 `~/.ssh/config`，也不运行 `ssh -G` 等命令推断 agent。连接失败时提示会区分三种情况：无法连接 agent 或指定位置不符合要求、agent 通信失败（未能读取密钥列表）、agent 中没有可用密钥。私钥始终留在 agent 内，Cage 不导出也不上传。
+### 导入本机 SSH 配置
+
+在「SSH 主机」侧栏点「导入本机 SSH 配置」，勾选要添加的主机。macOS 和 Linux 读取 `~/.ssh/config`，Windows 读取 `%USERPROFILE%\.ssh\config`。已有记录和已核对的 SSH 指纹会保留。
+
+导入的主机用本机 SSH agent 登录。先用 `ssh-add` 加入密钥，Cage 不读取私钥。需要跳板机或代理命令的主机会跳过。配置含 `Include` 或 `Match` 时，请手动添加主机。
 
 <figure class="guide-shot">
   <a href="../../www/public/docs/screenshots/ssh-host-form.jpg" target="_blank" rel="noopener" aria-label="查看原图：远程主机地址、认证与私钥路径表单"><img src="../../www/public/docs/screenshots/ssh-host-form.jpg" alt="远程主机地址、认证与私钥路径表单" width="2560" height="1764" loading="lazy" decoding="async" /></a>

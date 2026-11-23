@@ -36,7 +36,6 @@ export function TabIcon({ kind, favicon, agent, accountNumber, size = 16 }) {
 function TerminalAction({ label, icon: Icon, disabled, onClick }) {
   return (
     <button className="icon-button" aria-label={label} disabled={disabled} onClick={onClick}>
-      <span className="terminal-action-label" aria-hidden="true">{label}</span>
       <Icon size={14} />
     </button>
   );
@@ -315,9 +314,9 @@ export function WorkspaceTabs({
           const title = tabName(tab, saved, undefined, tr);
           const opening = Boolean(openingSession) && openingSession === tab.cli_session_id;
           const runningElsewhere = tab.sessionRunningElsewhere;
-          const runningNotice = tab.sessionClaudeDesktop
+          const runningNotice = tr(tab.sessionClaudeDesktop
             ? "Claude Desktop 占用中，请先在 Claude Desktop 中退出此会话再接续"
-            : "其他窗口占用中，退出原会话后可接续";
+            : "其他窗口占用中，退出原会话后可接续");
           const OwnerIcon = tab.sessionClaudeDesktop ? Monitor : TerminalSquare;
           const openError = tab.historySession && sessionOpenError?.id === tab.cli_session_id ? sessionOpenError.message : "";
           const errorID = `session-open-error-${tab.cli_session_id}`;

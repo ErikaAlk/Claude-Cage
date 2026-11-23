@@ -22,8 +22,14 @@ import { installRemoteInput } from "./remote-input";
 import { guestKeys } from "./guest-keys.mjs";
 import { runtimeSocketURL } from "./client-context.mjs";
 import { translate, useTranslation } from "./interface-language.mjs";
+import { localizeBackendMessage } from "./backend-message.mjs";
+import {
+  desktopClipboardState,
+  desktopMergeNoticeTarget,
+  desktopTitle as title,
+  reconcileAccountDesktopPanes,
+} from "./account-desktop-state.mjs";
 
-const title = (a) => a.number ? `#${String(a.number).padStart(2, "0")} ${a.label}` : a.label;
 const entry = (id) => "/desktop-instances/" + id;
 
 function DesktopAccountLabel({ account }) {
@@ -44,7 +50,6 @@ function DesktopRowAction({ label, icon: Icon, disabled, className = "", onClick
       disabled={disabled}
       onClick={onClick}
     >
-      <span className="terminal-action-label" aria-hidden="true">{label}</span>
       <Icon size={14} />
     </button>
   );
@@ -59,6 +64,9 @@ export function useAccountDesktops(onShow, onHide, notify, confirm, visible, rev
   const generation = useRef(0);
   const panesRef = useRef(panes);
   panesRef.current = panes;
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const previousDefaultRedirect = useRef(null);
   const notifyRef = useRef(notify);
   notifyRef.current = notify;
   const refresh = useCallback(async (background = false) => {
@@ -66,21 +74,16 @@ export function useAccountDesktops(onShow, onHide, notify, confirm, visible, rev
     try {
       const next = await api("/desktop-instances");
       if (g !== generation.current) return;
-      setCatalog(next);
-      setPanes(old => {
-        if (!next.instances || !old.length) return old;
-        if (old.some(p => next.redirects?.[p.id] === "default")) return [];
-        const seen = new Set();
-        const updated = [];
-        for (const pane of old) {
-          const id = next.redirects?.[pane.id] || pane.id;
-          const item = next.instances.find(a => a.id === id);
-          if (!item || seen.has(id) || id === "default") continue;
-          seen.add(id);
-          updated.push(item);
+      const nextDefaultRedirect = next?.redirects?.default || "";
+      if (previousDefaultRedirect.current !== null) {
+        const merged = desktopMergeNoticeTarget(previousDefaultRedirect.current, next);
+        if (merged) {
+          notifyRef.current(translate("默认 Desktop 与 {0} 为同一账号，已合并到该实例。", title(merged)));
         }
-        return updated;
-      });
+      }
+      previousDefaultRedirect.current = nextDefaultRedirect;
+      setCatalog(next);
+      setPanes((old) => reconcileAccountDesktopPanes(old, next, Boolean(visibleRef.current)));
       return next;
     } catch (e) {
       if (g === generation.current && !(background && e.status === 409)) notifyRef.current(e.message);
@@ -330,7 +333,9 @@ export function DesktopList({ model, disabled, selected, onDefault, onRename }) 
 
 function DesktopPane({
   account,
+  ready = true,
   visible,
+  windowVisible = true,
   focused,
   onFocus,
   keyboard,
@@ -347,21 +352,32 @@ function DesktopPane({
   const input = useRef(null);
   const clipboardRef = useRef(null);
   const clipboardReady = useRef(false);
-  const current = useRef({ visible: visible && focused, keyboard, systemClipboard, onStatus, onFallback });
-  current.current = { visible: visible && focused, keyboard, systemClipboard, onStatus, onFallback };
+  const screenVisible = visible && windowVisible;
+  const clipboardState = desktopClipboardState({
+    ready,
+    focused,
+    visible,
+    windowVisible,
+    native: nativeAvailable(),
+  });
+  const clipboardVisibleRef = useRef(clipboardState.pollingVisible);
+  clipboardVisibleRef.current = clipboardState.pollingVisible;
+  const current = useRef({ visible: screenVisible && focused, keyboard, systemClipboard, onStatus, onFallback });
+  current.current = { visible: screenVisible && focused, keyboard, systemClipboard, onStatus, onFallback };
   const [message, setMessage] = useState("");
   const [attempt, retry] = useState(0);
   useEffect(() => {
     if (!focused) input.current?.deactivate();
   }, [focused]);
   useEffect(() => {
-    if (!visible || !focused || !nativeAvailable()) return;
+    if (!clipboardState.connected) return;
     clipboardReady.current = false;
     const clipboard = shareClipboard({
       connect: () => new WebSocket(runtimeSocketURL(entry(account.id) + "/clipboard")),
       native,
       onStatus: (text) => current.current.onStatus?.(text),
       setActive: (active) => { clipboardReady.current = Boolean(active); },
+      isVisible: () => clipboardVisibleRef.current,
     });
     clipboardRef.current = clipboard;
     return () => {
@@ -369,16 +385,20 @@ function DesktopPane({
       clipboardRef.current = null;
       clipboard.dispose();
     };
-  }, [account.id, account.generation, visible, focused]);
+  }, [account.id, account.generation, clipboardState.connected]);
+  useEffect(() => {
+    clipboardRef.current?.setVisible(clipboardState.pollingVisible);
+  }, [clipboardState.pollingVisible]);
   useEffect(() => {
     onControl(account.id, {
       focus: () => rfb.current?.focus(),
       edit: (action) => (input.current?.focused() ? input.current.edit(action) : false),
+      pasteText: (text) => input.current?.paste(text),
     });
     return () => onControl(account.id, null);
   }, [account.id, onControl]);
   useEffect(() => {
-    if (!visible) return;
+    if (!screenVisible) return;
     const container = box.current;
     if (!container) return;
     let live = true,
@@ -499,7 +519,7 @@ function DesktopPane({
       rfb.current = null;
       client?.disconnect();
     };
-  }, [account.id, account.generation, visible, attempt]);
+  }, [account.id, account.generation, screenVisible, attempt]);
   return (
     <section
       className="account-desktop-pane"
@@ -520,7 +540,7 @@ function DesktopPane({
       <div className="account-desktop-screen" ref={box} />
       {message && (
         <div className="account-desktop-message" role="status">
-          {message}{" "}
+          {localizeBackendMessage(message, tr)}{" "}
           {message !== "正在连接…" && (
             <button onClick={() => retry(attempt + 1)}>{tr("重新连接")}</button>
           )}
@@ -533,7 +553,9 @@ function DesktopPane({
 export const DesktopPanes = forwardRef(function DesktopPanes(
   {
     model,
+    ready = true,
     visible,
+    windowVisible = true,
     keyboard,
     systemClipboard = true,
     uploads = [],
@@ -564,6 +586,10 @@ export const DesktopPanes = forwardRef(function DesktopPanes(
           if (control.edit(action)) return true;
         }
         return false;
+      },
+      pasteText: (text) => {
+        const target = controls.current.get(activePaneID) || controls.current.values().next().value;
+        target?.pasteText(text);
       },
     }),
     [activePaneID],
@@ -603,7 +629,9 @@ export const DesktopPanes = forwardRef(function DesktopPanes(
         <DesktopPane
           key={a.id}
           account={a}
+          ready={ready}
           visible={visible}
+          windowVisible={windowVisible}
           focused={activePaneID === a.id}
           onFocus={() => setFocusedID(a.id)}
           keyboard={keyboard}

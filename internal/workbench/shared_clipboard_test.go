@@ -70,10 +70,35 @@ func TestDesktopClipboardCommandIsScopedAndValidatesID(t *testing.T) {
 	if !strings.HasSuffix(cmd.Args[len(cmd.Args)-1], " --desktop "+id) {
 		t.Fatal("desktop clipboard did not select the requested instance")
 	}
+	importCmd, _, err := s.clipboardCommand(t.Context(), "import", clipboardFileSelection{Session: "sess-1", DesktopID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(importCmd.Args[len(importCmd.Args)-1], " --import --session sess-1 --desktop "+id) {
+		t.Fatalf("desktop clipboard import missing scoped flags: %s", importCmd.Args[len(importCmd.Args)-1])
+	}
+	exportCmd, _, err := s.clipboardCommand(t.Context(), "export", clipboardFileSelection{User: "cage", Paths: []string{"/tmp/a.txt"}, DesktopID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(exportCmd.Args[len(exportCmd.Args)-1], " --export-user cage --paths-stdin --desktop "+id) {
+		t.Fatalf("desktop clipboard export missing scoped flags: %s", exportCmd.Args[len(exportCmd.Args)-1])
+	}
 	for _, invalid := range []string{"default", "../other", id + ";echo bad"} {
-		if _, _, err := s.clipboardCommand(t.Context(), "stream", clipboardFileSelection{DesktopID: invalid}); err == nil {
-			t.Fatalf("accepted invalid instance %q", invalid)
+		for _, op := range []string{"stream", "import", "export"} {
+			if _, _, err := s.clipboardCommand(t.Context(), op, clipboardFileSelection{User: "cage", DesktopID: invalid}); err == nil {
+				t.Fatalf("accepted invalid instance %q for %s", invalid, op)
+			}
 		}
+	}
+	// File selections are scoped by DesktopID so identical paths in separate PrivateTmp namespaces do not collide.
+	defaultSel := s.registerClipboardFiles([]string{"/tmp/shared.txt"}, "cage")
+	desktopSel := s.registerClipboardFiles([]string{"/tmp/shared.txt"}, "cage", id)
+	if defaultSel == desktopSel {
+		t.Fatal("file selection collided across default and isolated desktop instances")
+	}
+	if got := s.clipboardFileSelection(desktopSel); got.DesktopID != id {
+		t.Fatalf("desktop file selection lost DesktopID: %+v", got)
 	}
 }
 

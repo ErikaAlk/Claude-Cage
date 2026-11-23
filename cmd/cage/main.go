@@ -26,6 +26,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/hostproxy"
 	"github.com/sylvinus/agent-vm/internal/limaembed"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
+	"github.com/sylvinus/agent-vm/internal/paths"
 	"github.com/sylvinus/agent-vm/internal/uilocale"
 	"github.com/sylvinus/agent-vm/internal/workbench"
 	"io"
@@ -531,7 +532,7 @@ func run() int {
 		if location.Custom {
 			// Resolve the profile prefix once, as Lima did before migration.
 			// Keep state itself logical so its original disk and socket paths survive.
-			realProfile, err := filepath.EvalSymlinks(profile)
+			realProfile, err := paths.Resolve(profile)
 			if err != nil {
 				return fail(err)
 			}
@@ -632,7 +633,11 @@ func run() int {
 		if resourceErr != nil {
 			return fail(resourceErr)
 		}
-		args = append([]string{"setup", "--memory", fmt.Sprint(memory), "--cpus", fmt.Sprint(cpus), "--disk", "24", "--preinstall=node,python,chromium,gh,claude,code-server"}, requireWorkbenchTools(args[1:])...)
+		disk, diskErr := cage.ConfiguredDiskLimit(path)
+		if diskErr != nil {
+			return fail(diskErr)
+		}
+		args = append([]string{"setup", "--memory", fmt.Sprint(memory), "--cpus", fmt.Sprint(cpus), "--disk", fmt.Sprint(disk), "--preinstall=node,python,chromium,gh,claude,code-server"}, requireWorkbenchTools(args[1:])...)
 	}
 	if args[0] == "up" || args[0] == "login" {
 		return startEnvironment(args[0], startArgs, cli.Stdio(), cli.Main, func() error {
