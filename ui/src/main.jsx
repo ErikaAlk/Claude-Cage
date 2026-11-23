@@ -1,9 +1,16 @@
-import { shortcut, primaryModifier } from "./platform.mjs";
+import { isMac, shortcut, primaryModifier } from "./platform.mjs";
+import {
+  DEFAULT_SIDEBAR_WIDTH,
+  MIN_SIDEBAR_WIDTH,
+  SIDEBAR_WIDTH_STEP,
+  clampSidebarWidth,
+  maxSidebarWidth,
+  nextSidebarWidth,
+} from "./sidebar-width.mjs";
 import logo from "./logo.png";
 import React, { useEffect, useRef, useState } from "react";
 import {
   Clock3,
-  FileCode2,
   FolderOpen,
   Globe2,
   LoaderCircle,
@@ -36,6 +43,7 @@ import { TERMINAL_LIMIT, liveTerminalCount } from "./session-order.mjs";
 import { InitializationGate } from "./initialization";
 import { ProjectRecovery } from "./project-recovery";
 import { DesktopPanes, useAccountDesktops } from "./account-desktops";
+import { mergedDefaultInstance } from "./account-desktop-state.mjs";
 import { ClaudeDesktop } from "./claude-desktop";
 import { ClaudeAccountsPanel, useClaudeAccounts } from "./claude-accounts";
 import { AccountProvider, AccountGate, useAccount } from "./account";
@@ -76,6 +84,7 @@ import { AppUpdateButton, AppUpdateDialog, useAppUpdates } from "./app-updates";
 import "./appearance.css";
 import { stopAndExit } from "./quit";
 import { useTranslation } from "./interface-language.mjs";
+import { localizeBackendMessage } from "./backend-message.mjs";
 
 function App() {
   const tr = useTranslation();
@@ -85,6 +94,22 @@ function App() {
     const refresh = () => refreshClientPreferences((value) => value + 1);
     window.addEventListener("cage-client-preferences", refresh);
     return () => window.removeEventListener("cage-client-preferences", refresh);
+  }, []);
+  useEffect(() => {
+    const timers = new WeakMap();
+    const onScroll = (event) => {
+      const target = event.target === document ? document.documentElement : event.target;
+      if (!(target instanceof Element)) return;
+      target.dataset.scrolling = "true";
+      const prev = timers.get(target);
+      if (prev) clearTimeout(prev);
+      timers.set(target, setTimeout(() => {
+        delete target.dataset.scrolling;
+        timers.delete(target);
+      }, 800));
+    };
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    return () => document.removeEventListener("scroll", onScroll, { capture: true });
   }, []);
   const claudeProfiles = useClaudeAccounts();
   const [managementPage, setManagementPage] = useState("");
@@ -125,6 +150,14 @@ function App() {
     [sidebarCollapsed, setSidebarCollapsed] = useState(
       readLocal(clientStorageKey("cage-sidebar-collapsed"), false),
     ),
+    [sidebarWidth, setSidebarWidth] = useState(() =>
+      clampSidebarWidth(
+        readLocal(clientStorageKey("cage-sidebar-width"), DEFAULT_SIDEBAR_WIDTH),
+        0,
+      ),
+    ),
+    [sidebarResizing, setSidebarResizing] = useState(false),
+    sidebarDrag = useRef(null),
     [browserTabLayout, setBrowserTabLayout] = useState(
       readLocal(clientStorageKey("cage-browser-tab-layout"), "horizontal"),
     ),
@@ -146,6 +179,15 @@ function App() {
     [details, setDetails] = useState(false),
     [safetyOpen, setSafetyOpen] = useState(false),
     [quitting, setQuitting] = useState(null);
+  // The state keeps the width the user chose. A narrow window only limits
+  // what is shown, so the choice comes back when the window grows again.
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const shownSidebarWidth = clampSidebarWidth(sidebarWidth, viewportWidth);
   // Keep feedback continuous until polling observes the accepted start job.
   const clientStatus = serverStatus && { ...serverStatus, keyboard: clientKeyboard(serverStatus.keyboard) };
   const status = clientStatus && startRequest
@@ -1039,10 +1081,17 @@ function App() {
       const b = JSON.parse(event.data);
       setBrowserError("");
       if (b.desktopFocus === true) {
-        accountDesktops.clear();
-        setDesktopOpen(true);
-        setHome(false);
-        setSettingsOpen(false);
+        const currentDesktops = notificationViewRef.current.accountDesktops;
+        const merged = mergedDefaultInstance(currentDesktops?.catalog);
+        if (merged) {
+          setSettingsOpen(false);
+          void currentDesktops.act(merged, "start");
+        } else {
+          currentDesktops?.clear();
+          setDesktopOpen(true);
+          setHome(false);
+          setSettingsOpen(false);
+        }
       }
       const previousPair = browserSnapshot.current.split;
       const local = layoutRef.current;
@@ -1189,6 +1238,8 @@ function App() {
       if (k === "t" && !event.shiftKey) handle = newPage;
       if (k === "n" && event.shiftKey) handle = () => openBrowserPage(undefined, true);
       if (k === "d") handle = () => document.dispatchEvent(new Event("cage-add-favorite"));
+      if ((isMac && k === "y" && !event.shiftKey) || (!isMac && k === "h" && !event.shiftKey))
+        handle = () => document.dispatchEvent(new Event("cage-show-history"));
       if (k === "enter" && event.shiftKey) handle = newTerminalHere;
       if (k === "l")
         handle = () => {
@@ -1630,14 +1681,65 @@ function App() {
         {dialogs}
       </>
     );
+  const currentSidebarMax = maxSidebarWidth(typeof window !== "undefined" ? window.innerWidth : 0);
+  const startSidebarResize = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const rtl = document.documentElement.dir === "rtl";
+    sidebarDrag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: shownSidebarWidth, rtl, latest: shownSidebarWidth };
+    setSidebarResizing(true);
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* noop */ }
+  };
+  const moveSidebarResize = (event) => {
+    const drag = sidebarDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const width = nextSidebarWidth(drag.startWidth, event.clientX - drag.startX, drag.rtl, window.innerWidth);
+    drag.latest = width;
+    setSidebarWidth(width);
+  };
+  const finishSidebarResize = (event) => {
+    const drag = sidebarDrag.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    sidebarDrag.current = null;
+    setSidebarResizing(false);
+    try {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch { /* noop */ }
+    persist("cage-sidebar-width", drag.latest, setSidebarWidth);
+  };
+  const resetSidebarWidth = () => {
+    persist("cage-sidebar-width", clampSidebarWidth(DEFAULT_SIDEBAR_WIDTH, window.innerWidth), setSidebarWidth);
+  };
+  const onSidebarResizeKeyDown = (event) => {
+    const rtl = document.documentElement.dir === "rtl";
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      const step = event.key === "ArrowRight" ? SIDEBAR_WIDTH_STEP : -SIDEBAR_WIDTH_STEP;
+      const width = nextSidebarWidth(shownSidebarWidth, step, rtl, window.innerWidth);
+      persist("cage-sidebar-width", width, setSidebarWidth);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      persist("cage-sidebar-width", MIN_SIDEBAR_WIDTH, setSidebarWidth);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      persist("cage-sidebar-width", maxSidebarWidth(window.innerWidth), setSidebarWidth);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      resetSidebarWidth();
+    }
+  };
   return (
     <SafetyChecklistContext.Provider value={() => setSafetyOpen(true)}>
     <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <div
-        className="workbench-shell"
+        className={`workbench-shell ${sidebarResizing ? "sidebar-resizing" : ""}`}
+        style={sidebarWidth === DEFAULT_SIDEBAR_WIDTH ? undefined : { "--sidebar-width": `${shownSidebarWidth}px` }}
         inert={settingsOpen || undefined}
       >
         {!sidebarCollapsed && (
+          <>
           <WorkspaceSidebar
             onClaudeAccounts={() => setManagementPage("claude-accounts")}
             claudeAccountsOpen={managementPage === "claude-accounts"}
@@ -1696,7 +1798,17 @@ function App() {
             onClaudeWeb={() => openBrowserPage("https://claude.ai/")}
             accountDesktops={status.account_desktops_supported ? accountDesktops : null}
             onDesktopRename={(desktop) => setRename({ id: desktop.id, title: desktop.label || "", desktop: true })}
-            onClaudeDesktop={() => { accountDesktops.clear(); setManagementPage(""); setHome(false); setDesktopOpen(true); }}
+            onClaudeDesktop={() => {
+              const merged = mergedDefaultInstance(accountDesktops.catalog);
+              if (merged) {
+                void accountDesktops.act(merged, "start");
+                return;
+              }
+              accountDesktops.clear();
+              setManagementPage("");
+              setHome(false);
+              setDesktopOpen(true);
+            }}
             onEditor={openEditor}
             onSettings={openSettings}
             onAccountConfirm={confirm}
@@ -1706,9 +1818,31 @@ function App() {
               persist("cage-sidebar-collapsed", true, setSidebarCollapsed)
             }
           />
+          <div
+            className="sidebar-resize-handle"
+            role="separator"
+            tabIndex={0}
+            aria-orientation="vertical"
+            aria-label={tr("调整侧栏宽度")}
+            aria-valuemin={MIN_SIDEBAR_WIDTH}
+            aria-valuemax={currentSidebarMax}
+            aria-valuenow={shownSidebarWidth}
+            onPointerDown={startSidebarResize}
+            onPointerMove={moveSidebarResize}
+            onPointerUp={finishSidebarResize}
+            onPointerCancel={finishSidebarResize}
+            onDoubleClick={resetSidebarWidth}
+            onKeyDown={onSidebarResizeKeyDown}
+          />
+          </>
         )}
         <div className="workbench-main">
-          {!managementPage && showHome && terminalHeader(null)}
+          {!managementPage && showHome && (sidebarCollapsed || busy) && (
+            <div className="home-floating-chrome">
+              {sidebarButton()}
+              {busy && <div className="progress-line" />}
+            </div>
+          )}
           {shouldShowBrowserError({ browserError, browserVisible, managementPage, running, connectionError }) && <div className="connection-banner" role="status">
             <span>{tr("客机浏览器暂时无法连接。")}{browserError}</span>
             <button onClick={() => refreshStatus.current?.()}>{tr("重试")}</button>
@@ -1755,18 +1889,20 @@ function App() {
             {!storageRecovery && desktopOpen && accountDesktops.panes.length>0 && <DesktopPanes
               ref={accountDesktopControl}
               model={accountDesktops}
-              visible={!settingsOpen && !managementPage && windowVisible}
+              ready={Boolean(status.ready)}
+              visible={!settingsOpen && !managementPage}
+              windowVisible={windowVisible}
               keyboard={status.keyboard}
               systemClipboard={browser.capabilities?.systemClipboard !== false}
               uploads={desktopFiles.uploads}
               status={status}
-              onProjectOpened={() => refreshStatus.current?.()}
+              onProjectOpened={async () => { await refreshSettings(); await refreshStatus.current?.(); }}
               onStatus={notify}
               onFallback={(text, message) => setTransfer({ text, message })}
             />}
             {!storageRecovery && desktopOpen && !accountDesktops.panes.length && <ClaudeDesktop
               uploads={desktopFiles.uploads}
-              onProjectOpened={() => refreshStatus.current?.()}
+              onProjectOpened={async () => { await refreshSettings(); await refreshStatus.current?.(); }}
               status={status} visible={!settingsOpen && !managementPage} remoteRef={remote}
               onStatus={notify} onFallback={(text, message) => setTransfer({ text, message })}
               onConfirm={confirm} onDetails={() => setDetails(true)}
@@ -1874,21 +2010,17 @@ function App() {
                           : tr("Cage 环境已就绪")
                         : setupProxy
                           ? tr("为 Claude 准备独立工作区")
-                          : tr("先启动 Cage 环境")}
+                          : "Claude Cage"}
                   </h1>
-                  <p className="welcome-subtitle">
-                    <SafetyMessage message={busy
-                      ? tr(status.job.message)
-                      : running
-                        ? !status.ready
+                  {(busy || (running && (!status.ready || network.mode !== "open"))) && (
+                    <p className="welcome-subtitle">
+                      <SafetyMessage message={busy
+                        ? localizeBackendMessage(status.job.message, tr)
+                        : !status.ready
                           ? status.environment_update_error || "浏览器连接尚未就绪，可以恢复连接或继续使用终端。"
-                          : network.mode === "open"
-                            ? "环境已连接，网络检查通过。可以浏览网页或打开本地项目。"
-                            : tr("{0}。终端与本地文件仍可使用。", tr(network.label))
-                        : setupProxy
-                          ? "先连接你的代理，再启动浏览器、终端和编辑器。无需安装额外的代理软件。"
-                          : "准备独立的浏览器和终端，完成网络检查后开始工作。"} />
-                  </p>
+                          : tr("{0}。终端与本地文件仍可使用。", tr(network.label))} />
+                    </p>
+                  )}
                   {!running && (
                     <ol className="onboarding-steps" aria-label={tr("开始使用 Cage")}>
                       {["配置代理", "启动环境", "开始工作"].map(
@@ -1909,37 +2041,31 @@ function App() {
                     </ol>
                   )}
                   <div className="start-project-box">
-                    <div className="environment-summary">
-                      <EnvironmentShield
-                        healthy={status.ready && network.mode === "open"}
-                        size={24}
-                      />
-                      <span>
-                        <strong>{tr("Cage 隔离环境")}</strong>
-                        <small>
-                          {running
-                            ? runtimeLabel
-                            : setupProxy
-                              ? tr("自备代理订阅、YAML 配置或节点")
-                              : tr("代理已配置，首次启动会下载开发环境")}
-                        </small>
-                      </span>
-                    </div>
-                    {!busy && !running && !account?.guest_system && status.local_vm_storage && !isRemoteClient() && <GuestSystemPicker system={guestSystem} onChange={setGuestSystem} />}
-                    {!running && status.local_vm_storage && !isRemoteClient() && <button className="storage-entry text-button" disabled={busy} onClick={() => openSettings("project")}>{tr("选择环境存储位置")}</button>}
-                    <div className="start-project-footer">
-                      <span>
-                        <i className={`status-dot ${network.mode}`} />
-                        {busy
-                          ? runtimeLabel
-                          : running
-                            ? tr(network.label)
-                            : setupProxy
-                              ? tr("等待配置代理")
-                              : tr("环境已停止")}
-                      </span>
+                    <div className="start-project-row">
+                      <div className="environment-summary">
+                        <span className="environment-shield-badge" aria-hidden="true">
+                          <EnvironmentShield
+                            healthy={status.ready && network.mode === "open"}
+                            size={20}
+                          />
+                        </span>
+                        <span className="environment-summary-copy">
+                          <strong>{tr("Cage 隔离环境")}</strong>
+                          <small className="environment-status-line">
+                            <i className={`status-dot ${network.mode}`} />
+                            {busy
+                              ? runtimeLabel
+                              : running
+                                ? tr(network.label)
+                                : setupProxy
+                                  ? tr("等待配置代理")
+                                  : tr("环境已停止")}
+                          </small>
+                        </span>
+                      </div>
                       <button
                         className="primary"
+                        ref={showHome ? terminalTrigger : undefined}
                         data-terminal-location="start"
                         disabled={busy || Boolean(connectionError) || (!running && !setupProxy &&
                           ((!account?.guest_system && status.local_vm_storage && !isRemoteClient() && guestSystem === undefined) || !validGuestChoice(guestSystem)))}
@@ -1978,38 +2104,9 @@ function App() {
                                 : tr("新建终端")}
                       </button>
                     </div>
+                    {!busy && !running && !account?.guest_system && status.local_vm_storage && !isRemoteClient() && <GuestSystemPicker system={guestSystem} onChange={setGuestSystem} />}
                     {terminalMenuAt("start")}
                   </div>
-                  {running && (
-                    <div className="welcome-shortcuts">
-                      <button onClick={newTerminalHere} data-terminal-location="shortcuts" aria-haspopup="menu" disabled={busy}>
-                        <TerminalSquare size={16} />
-                        {tr("新建终端")}
-                      </button>
-                      <button
-                        onClick={() => openEditor(contentWorkspace)}
-                        disabled={!status.ready || busy}
-                      >
-                        <FileCode2 size={16} />
-                        {tr("浏览文件")}
-                      </button>
-                    </div>
-                  )}
-                  {terminalMenuAt("shortcuts")}
-                  {!running && (
-                    <p className="welcome-hint">
-                      {setupProxy
-                        ? tr("Cage 不提供代理或 Claude 账户。连接后，在 Cage 内完成 Claude 登录。")
-                        : tr("首次安装时可在操作详情中查看下载和配置进度；中断后可以继续安装。")}
-                    </p>
-                  )}
-                  {running && status.ready && (
-                    <p className="welcome-hint">
-                      {tr("打开项目后，在终端输入") + " "}<code>claude</code>{tr("，按提示登录你的账户。")}
-                      <br />
-                      {isRemoteClient() ? tr("打开的项目位于云端，编辑和删除会直接影响云端文件。") : tr("打开的项目与本机共享，编辑和删除文件会同步。")}
-                    </p>
-                  )}
                   </>}
                   {status.project_error && (
                     <div className="start-error" role="alert">
@@ -2053,7 +2150,7 @@ function App() {
                   )}
                   {!storageRecovery && !setupProgress && status.job?.error && (
                     <div className="start-error" role="alert">
-                      <strong>{tr(status.job.message || "本次操作未完成")}</strong>
+                      <strong>{status.job.message ? localizeBackendMessage(status.job.message, tr) : tr("本次操作未完成")}</strong>
                       <p><SafetyMessage message={status.job.error} /></p>
                       {status.can_restore && (
                         <button
@@ -2065,7 +2162,7 @@ function App() {
                       )}
                     </div>
                   )}
-                  {!setupProgress && status.job?.log && (
+                  {!setupProgress && status.job?.log && (busy || Boolean(status.job?.error) || !running || !status.ready) && (
                     <button
                       className="text-button details-link"
                       onClick={() => setDetails(true)}
@@ -2154,6 +2251,7 @@ function App() {
         <SettingsPanel
           current={settings}
           status={status}
+          workspace={workspace}
           initialSection={settingsSection}
           onClose={() => setSettingsOpen(false)}
           onSaved={refreshSettings}
@@ -2287,7 +2385,7 @@ function App() {
               <button
                 className="primary"
                 onClick={() => {
-                  remote.current?.pasteText(transfer.text);
+                  (viewingAccountDesktop ? accountDesktopControl.current : remote.current)?.pasteText(transfer.text);
                   setTransfer(null);
                 }}
               >
