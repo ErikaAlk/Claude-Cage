@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /usr/local/libexec/cage-qq-stop.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

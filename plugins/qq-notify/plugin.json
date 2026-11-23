@@ -1,0 +1,43 @@
+{
+  "name": "qq-notify",
+  "displayName": "QQ 完成通知",
+  "description": "通过 Robin 将 Claude Code 的完整最终回复发送到本人 QQ。",
+  "version": "1.0.0",
+  "kind": "guest",
+  "engines": {
+    "cage": ">=0.2.0"
+  },
+  "permissions": [
+    "network"
+  ],
+  "categories": [
+    "productivity"
+  ],
+  "contributes": {
+    "mcpServers": [
+      {
+        "id": "notify",
+        "command": [
+          "sh",
+          "start.sh"
+        ]
+      }
+    ],
+    "settings": [
+      {
+        "id": "url",
+        "title": "Robin 服务地址",
+        "type": "string",
+        "env": "ROBIN_URL",
+        "required": true
+      },
+      {
+        "id": "token",
+        "title": "专用通知凭据",
+        "type": "secret",
+        "env": "ROBIN_TOKEN",
+        "required": true
+      }
+    ]
+  }
+}
