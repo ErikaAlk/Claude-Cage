@@ -15,6 +15,7 @@
 - Linux 浏览器使用 kiosk 全屏，隐藏全屏提示和顶部退出按钮；此模式不提供 Chromium 原生开发者工具。
 - [扩展弹窗布局插件](../plugins/popup-layout/README.md)可将 Linux 原生扩展弹窗保持在画面右侧，随画面尺寸变化调整位置。
 - Happiest 客机插件为已配对的连接器提供历史分页与会话关闭接口。
+- [QQ 完成通知插件](../plugins/qq-notify/README.md)通过 Robin 把 Claude Code 的最终回复发送到本人 QQ，长文按顺序分条。
 - 端口监听器在建立新转发时读取当前客机代理连接，避免持续引用已经关闭的连接。
 - Windows 托盘左键单击打开 Cage；远程输入桥返回实际焦点状态，并向输入法提供原生候选位置。
 
