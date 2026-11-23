@@ -77,6 +77,7 @@ internal sealed class AppUpdater : IDisposable
             var target = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar);
             if (string.IsNullOrEmpty(target)) return false;
             UpdatePolicy.PlainPath(target);
+            if (File.Exists(Path.Combine(target, "DEVELOPMENT-BUILD.txt"))) return false;
             var idPath = Path.Combine(target, "Cage.install-id");
             if (!File.Exists(idPath)) return false;
             UpdatePolicy.PlainPath(idPath);
